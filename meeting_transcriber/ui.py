@@ -504,9 +504,7 @@ class MainWindow(QWidget):
         local_l.addWidget(self.model_combo, 1)
         local_l.addWidget(QLabel("Compute:"))
         self.compute_combo = QComboBox()
-        self.compute_combo.addItem("Auto", "auto")
-        self.compute_combo.addItem("CPU", "cpu")
-        self.compute_combo.addItem("GPU (CUDA)", "cuda")
+        self._populate_compute_combo()
         self.compute_combo.currentIndexChanged.connect(self._update_compute_label)
         local_l.addWidget(self.compute_combo)
         self._compute_label = QLabel("")
@@ -546,16 +544,38 @@ class MainWindow(QWidget):
         self._update_compute_label()
         return engine_box
 
+    def _populate_compute_combo(self) -> None:
+        from .transcribe import hardware_caps
+
+        caps = hardware_caps()
+        # (label, data, enabled, tooltip)
+        items = [
+            ("Auto", "auto", True, "Pick the best available device automatically"),
+            ("CPU", "cpu", True, "Run on CPU"),
+            ("GPU (NVIDIA CUDA)", "cuda", caps["cuda"],
+             "Run on NVIDIA GPU" if caps["cuda"] else "No NVIDIA CUDA GPU detected"),
+        ]
+        if caps["apple"]:
+            items.append((
+                "GPU (Apple Silicon)", "mlx", caps["mlx"],
+                "Run on the Apple GPU via MLX" if caps["mlx"]
+                else "Install mlx-whisper to enable Apple-GPU transcription",
+            ))
+        self.compute_combo.clear()
+        for label, data, enabled, tip in items:
+            self.compute_combo.addItem(label, data)
+            item = self.compute_combo.model().item(self.compute_combo.count() - 1)
+            item.setEnabled(enabled)
+            item.setToolTip(tip)
+
     def _update_compute_label(self) -> None:
-        from .transcribe import detect_compute
+        from .transcribe import compute_label
 
         choice = self.compute_combo.currentData()
-        if choice == "cpu":
-            self._compute_label.setText("· CPU (int8)")
-        elif choice == "cuda":
-            self._compute_label.setText("· GPU CUDA (float16)")
+        if choice == "auto":
+            self._compute_label.setText(f"· auto → {compute_label('auto')}")
         else:
-            self._compute_label.setText(f"· auto → {detect_compute()[2]}")
+            self._compute_label.setText(f"· {compute_label(choice)}")
 
     def _build_sources_box(self) -> QGroupBox:
         src_box = QGroupBox("Audio sources")
@@ -1003,14 +1023,13 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "No source", "Enable at least one audio source.")
             return
 
-        device, compute_type = {
-            "cpu": ("cpu", "int8"), "cuda": ("cuda", "float16"),
-        }.get(self.compute_combo.currentData(), ("auto", "auto"))
+        sel = self.compute_combo.currentData() or "auto"
+        compute_type = {"cpu": "int8", "cuda": "float16"}.get(sel, "auto")
         config = {
             "engine": self.engine_combo.currentData(),
             "language": self.lang_edit.text().strip(),
             "model_size": self.model_combo.currentText().strip(),
-            "device": device,
+            "device": sel,            # auto | cpu | cuda | mlx (resolved in make_transcriber)
             "compute_type": compute_type,
             "api_key": self.api_key_edit.text().strip(),
             "openai_model": self.openai_model_combo.currentText(),

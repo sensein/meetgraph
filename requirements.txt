@@ -8,6 +8,8 @@ soxr>=0.3.7            # high-quality resampling (optional, has a numpy fallback
 
 # Local transcription engine
 faster-whisper>=1.0.0
+# Apple-Silicon GPU transcription (Metal via MLX) — macOS arm64 only
+mlx-whisper>=0.4; sys_platform == "darwin" and platform_machine == "arm64"
 
 # Cloud transcription engine
 openai>=1.30
