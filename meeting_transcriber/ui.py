@@ -376,9 +376,6 @@ class MainWindow(QWidget):
         srow.addWidget(refresh)
         v.addLayout(srow)
 
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.setChildrenCollapsible(False)
-
         self.meetings_table = QTableWidget(0, 4)
         self.meetings_table.setHorizontalHeaderLabels(["Meeting", "Date", "Participant", "Summary"])
         self.meetings_table.verticalHeader().setVisible(False)
@@ -386,6 +383,7 @@ class MainWindow(QWidget):
         self.meetings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.meetings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.meetings_table.setSortingEnabled(True)
+        self.meetings_table.setCursor(Qt.CursorShape.PointingHandCursor)
         hh = self.meetings_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -394,42 +392,14 @@ class MainWindow(QWidget):
         self.meetings_table.setStyleSheet(
             "QTableWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;gridline-color:#eef1f6;}"
             "QHeaderView::section{background:#f1f5f9;border:none;padding:8px;font-weight:700;color:#475569;}"
-            "QTableWidget::item{padding:6px;}"
+            "QTableWidget::item{padding:8px 6px;}"
             "QTableWidget::item:selected{background:#2563eb;color:#ffffff;}"
         )
-        self.meetings_table.itemSelectionChanged.connect(self._on_meeting_selected)
-        split.addWidget(self.meetings_table)
+        # Open a meeting's detail in its own window on click.
+        self.meetings_table.cellClicked.connect(self._open_meeting_detail)
+        v.addWidget(self.meetings_table, 1)
 
-        detail = QWidget(); detail.setObjectName("RecordPage")
-        dl = QVBoxLayout(detail); dl.setContentsMargins(0, 8, 0, 0); dl.setSpacing(6)
-        drow = QHBoxLayout(); drow.setSpacing(8)
-        dlabel = QLabel("Details"); dlabel.setStyleSheet(_LABEL)
-        drow.addWidget(dlabel); drow.addStretch()
-        self.detail_copy_btn = QPushButton("Copy")
-        self.detail_copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._view_md))
-        drow.addWidget(self.detail_copy_btn)
-        self.detail_export_btn = QPushButton("Export .md")
-        self.detail_export_btn.clicked.connect(self._export_detail)
-        drow.addWidget(self.detail_export_btn)
-        self.detail_share_btn = QPushButton("Share…")
-        self.detail_share_btn.clicked.connect(self._share_detail)
-        drow.addWidget(self.detail_share_btn)
-        self.detail_delete_btn = QPushButton("Delete")
-        self.detail_delete_btn.setObjectName("danger")
-        self.detail_delete_btn.clicked.connect(self._delete_selected)
-        drow.addWidget(self.detail_delete_btn)
-        dl.addLayout(drow)
-        self.detail_view = QTextEdit()
-        self.detail_view.setObjectName("transcript")
-        self.detail_view.setReadOnly(True)
-        self.detail_view.setFont(QFont("SF Pro Text", 13))
-        self.detail_view.setPlaceholderText("Select a meeting above to view its summary and full transcript.")
-        dl.addWidget(self.detail_view, 1)
-        split.addWidget(detail)
-        split.setSizes([320, 340])
-        v.addWidget(split, 1)
-
-        self.meetings_count = QLabel("")
+        self.meetings_count = QLabel("Click a meeting to open its details.")
         self.meetings_count.setStyleSheet("color:#64748b; font-size:12px;")
         v.addWidget(self.meetings_count)
         self._refresh_meetings()
@@ -463,73 +433,20 @@ class MainWindow(QWidget):
             self.meetings_table.setItem(r, 3, QTableWidgetItem("✦ yes" if m.summary_md else "—"))
         self.meetings_table.setSortingEnabled(True)
         self.meetings_count.setText(
-            f"{len(meetings)} meeting(s)" + (f" matching “{query.strip()}”" if query.strip() else "")
+            (f"{len(meetings)} meeting(s)" + (f" matching “{query.strip()}”" if query.strip() else ""))
+            + " · click a row to open"
         )
 
-    def _selected_meeting_id(self):
-        items = self.meetings_table.selectedItems()
-        if not items:
-            return None
-        cell = self.meetings_table.item(items[0].row(), 0)
-        return cell.data(Qt.ItemDataRole.UserRole) if cell else None
-
-    def _on_meeting_selected(self) -> None:
-        mid = self._selected_meeting_id()
+    def _open_meeting_detail(self, row: int, _col: int = 0) -> None:
+        cell = self.meetings_table.item(row, 0)
+        mid = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         if mid is None:
             return
         rec = self.store.get_meeting(mid)
         if not rec:
-            self.detail_view.setMarkdown("_Meeting not found._")
+            QMessageBox.information(self, "Not found", "Meeting not found.")
             return
-        parts = []
-        if rec.get("summary_md"):
-            parts.append(rec["summary_md"])
-        else:
-            parts.append(f"# {rec.get('title') or 'Meeting'}\n\n_No summary was generated._")
-        parts.append("\n\n---\n\n## Full transcript\n\n")
-        parts.append(rec.get("transcript_md") or "_No transcript._")
-        self._view_md = "".join(parts)
-        self._view_json = rec.get("summary_json") or ""
-        self.detail_view.setMarkdown(self._view_md)
-
-    def _delete_selected(self) -> None:
-        mid = self._selected_meeting_id()
-        if mid is None:
-            QMessageBox.information(self, "Delete", "Select a meeting to delete.")
-            return
-        if QMessageBox.question(
-            self, "Delete meeting", "Delete this meeting from the local database? This cannot be undone."
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        self.store.delete_meeting(mid)
-        self.detail_view.clear()
-        self._view_md = ""
-        self._view_json = ""
-        self._refresh_meetings()
-
-    def _export_detail(self) -> str | None:
-        if not self._view_md:
-            QMessageBox.information(self, "Nothing to export", "Select a meeting first.")
-            return None
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export meeting", f"meetgraph-{datetime.now():%Y%m%d-%H%M}.md", "Markdown (*.md)"
-        )
-        if not path:
-            return None
-        if not path.endswith(".md"):
-            path += ".md"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self._view_md)
-        if self._view_json:
-            with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
-                f.write(self._view_json)
-        self.status_label.setText(f"Exported → {path}")
-        return path
-
-    def _share_detail(self) -> None:
-        path = self._export_detail()
-        if path:
-            reveal_in_file_manager(path)
+        MeetingDetailDialog(self, rec).exec()
 
     def _build_config_tab(self) -> QWidget:
         page = QWidget()
@@ -1264,6 +1181,103 @@ def _escape(text: str) -> str:
     return (
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     )
+
+
+class MeetingDetailDialog(QDialog):
+    """A meeting's summary + full transcript in its own window, with actions."""
+
+    def __init__(self, parent, rec: dict):
+        super().__init__(parent)
+        self._parent = parent
+        self._rec = rec
+        self._mid = rec.get("id")
+        self._json = rec.get("summary_json") or ""
+        title = rec.get("title") or "Meeting"
+        self.setWindowTitle(f"MeetGraph — {title}")
+        self.setWindowIcon(app_icon())
+        self.resize(780, 700)
+
+        parts = []
+        if rec.get("summary_md"):
+            parts.append(rec["summary_md"])
+        else:
+            parts.append(f"# {title}\n\n_No summary was generated._")
+        parts.append("\n\n---\n\n## Full transcript\n\n")
+        parts.append(rec.get("transcript_md") or "_No transcript._")
+        self._md = "".join(parts)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(10)
+
+        head = QLabel(title)
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        when = (rec.get("started_at") or rec.get("created_at") or "")[:16].replace("T", " ")
+        sub = QLabel(f"{when}   ·   {rec.get('user') or ''}")
+        sub.setObjectName("HeaderSubtitle")
+        v.addWidget(sub)
+
+        view = QTextEdit()
+        view.setObjectName("transcript")
+        view.setReadOnly(True)
+        view.setFont(QFont("SF Pro Text", 13))
+        view.setMarkdown(self._md)
+        v.addWidget(view, 1)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        copy = QPushButton("Copy")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self._md))
+        row.addWidget(copy)
+        exp = QPushButton("Export .md")
+        exp.setObjectName("primary")
+        exp.clicked.connect(self._export)
+        row.addWidget(exp)
+        share = QPushButton("Share…")
+        share.clicked.connect(self._share)
+        row.addWidget(share)
+        row.addStretch()
+        delete = QPushButton("Delete")
+        delete.setObjectName("danger")
+        delete.clicked.connect(self._delete)
+        row.addWidget(delete)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+
+    def _export(self) -> str | None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export meeting", f"meetgraph-{datetime.now():%Y%m%d-%H%M}.md", "Markdown (*.md)"
+        )
+        if not path:
+            return None
+        if not path.endswith(".md"):
+            path += ".md"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self._md)
+        if self._json:
+            with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
+                f.write(self._json)
+        return path
+
+    def _share(self) -> None:
+        path = self._export()
+        if path:
+            reveal_in_file_manager(path)
+
+    def _delete(self) -> None:
+        if QMessageBox.question(
+            self, "Delete meeting", "Delete this meeting from the local database? This cannot be undone."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._parent.store.delete_meeting(self._mid)
+            self._parent._refresh_meetings()
+        except Exception:
+            pass
+        self.accept()
 
 
 class WelcomeDialog(QDialog):
