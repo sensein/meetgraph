@@ -26,5 +26,9 @@ pyoxigraph>=0.4
 # pymysql (MySQL). Graph-database (SPARQL) export uses the stdlib `urllib`.
 SQLAlchemy>=2.0
 
+# Optional: deliver summaries to an MCP server (Model Context Protocol).
+# REST/webhook delivery and email use the stdlib (urllib / smtplib).
+mcp>=1.0; python_version >= "3.10"
+
 # Local storage uses the stdlib `sqlite3` — no extra dependency.
 # Key-term -> Wikipedia/Wikidata linking uses the stdlib `urllib` — no extra dependency.

@@ -96,6 +96,18 @@ class Store:
                 )
                 """
             )
+            # Delivery state — which meetings were already sent to which destination,
+            # so bulk send/sync can skip what's already delivered.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS delivery_state (
+                    meeting_id   INTEGER,
+                    destination  TEXT,
+                    ts           TEXT,
+                    PRIMARY KEY (meeting_id, destination)
+                )
+                """
+            )
             # Audit log — who did what (create/edit/delete/sync), kept for accountability.
             con.execute(
                 """
@@ -203,6 +215,27 @@ class Store:
                 (meeting_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def mark_sent(self, meeting_id: int, destination: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO delivery_state(meeting_id, destination, ts) VALUES (?, ?, ?)",
+                (meeting_id, destination, datetime.now().isoformat(timespec="seconds")),
+            )
+
+    def sent_destinations(self, meeting_id: int) -> set[str]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT destination FROM delivery_state WHERE meeting_id = ?", (meeting_id,)
+            ).fetchall()
+            return {r["destination"] for r in rows}
+
+    def is_sent(self, meeting_id: int, destination: str) -> bool:
+        with self._connect() as con:
+            return con.execute(
+                "SELECT 1 FROM delivery_state WHERE meeting_id = ? AND destination = ?",
+                (meeting_id, destination),
+            ).fetchone() is not None
 
     def log_action(
         self,

@@ -404,6 +404,11 @@ class MainWindow(QWidget):
         refresh = QPushButton("↻ Refresh")
         refresh.clicked.connect(self._refresh_meetings)
         srow.addWidget(refresh)
+        send_btn = QPushButton("⇪ Send…")
+        send_btn.setToolTip("Bulk send/sync these meetings to email, REST API, MCP, or your "
+                            "external databases — skipping any already sent.")
+        send_btn.clicked.connect(self._bulk_send)
+        srow.addWidget(send_btn)
         graph_btn = QPushButton("⬡ Export graph")
         graph_btn.setToolTip("Export all meetings as one connected knowledge graph "
                              "(JSON-LD / Turtle) — key terms linked to Wikipedia/Wikidata, "
@@ -490,6 +495,20 @@ class MainWindow(QWidget):
             return
         MeetingDetailDialog(self, rec).exec()
 
+    def _bulk_send(self) -> None:
+        """Bulk send/sync the meetings currently shown in the Summary table."""
+        try:
+            query = self.search_edit.text() if hasattr(self, "search_edit") else ""
+            metas = (self.store.search_meetings(query) if query.strip()
+                     else self.store.list_meetings(user=self.user or None, limit=5000))
+            ids = [m.id for m in metas]
+        except Exception:
+            ids = []
+        if not ids:
+            QMessageBox.information(self, "Nothing to send", "No meetings to send yet.")
+            return
+        self._open_send_dialog(ids, f"Send / sync {len(ids)} meeting(s)")
+
     def _export_graph(self) -> None:
         """Export every meeting as one connected RDF knowledge graph."""
         from . import kg
@@ -540,6 +559,7 @@ class MainWindow(QWidget):
         v.addWidget(self._build_external_box())
         v.addWidget(self._build_team_box())
         v.addWidget(self._build_email_box())
+        v.addWidget(self._build_integrations_box())
         v.addStretch()
 
         scroll = QScrollArea()
@@ -924,6 +944,111 @@ class MainWindow(QWidget):
         outer.addLayout(btn_row)
         return box
 
+    def _build_integrations_box(self) -> QGroupBox:
+        box = QGroupBox("Integrations — also send summary + transcript to a REST API or MCP server")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+        _HINT = "color:#64748b; font-size:11px;"
+
+        # REST
+        self.rest_enable = QCheckBox("REST API (HTTP webhook)")
+        outer.addWidget(self.rest_enable)
+        rform = QFormLayout()
+        rform.setContentsMargins(22, 0, 0, 0)
+        rrow = QHBoxLayout()
+        self.rest_url = QLineEdit()
+        self.rest_url.setPlaceholderText("https://api.example.com/meetings")
+        rrow.addWidget(self.rest_url, 1)
+        rrow.addWidget(QLabel("Method:"))
+        self.rest_method = QComboBox()
+        self.rest_method.addItems(["POST", "PUT"])
+        rrow.addWidget(self.rest_method)
+        rform.addRow("Endpoint URL", self._wrap(rrow))
+        self.rest_auth = QLineEdit()
+        self.rest_auth.setEchoMode(QLineEdit.EchoMode.Password)
+        self.rest_auth.setPlaceholderText("Authorization header, e.g. Bearer <token> (optional)")
+        rform.addRow("Auth header", self.rest_auth)
+        self.rest_headers = QLineEdit()
+        self.rest_headers.setPlaceholderText('Extra headers as JSON, e.g. {"X-Team":"acme"} (optional)')
+        rform.addRow("Extra headers", self.rest_headers)
+        rtest_row = QHBoxLayout()
+        rtest = QPushButton("Send test request")
+        rtest.clicked.connect(self._test_rest)
+        rtest_row.addWidget(rtest)
+        self.rest_status = QLabel("")
+        self.rest_status.setStyleSheet(_HINT)
+        rtest_row.addWidget(self.rest_status, 1)
+        rform.addRow("", self._wrap(rtest_row))
+        outer.addLayout(rform)
+
+        # MCP
+        self.mcp_enable = QCheckBox("MCP server (Model Context Protocol tool)")
+        outer.addWidget(self.mcp_enable)
+        mform = QFormLayout()
+        mform.setContentsMargins(22, 0, 0, 0)
+        self.mcp_url = QLineEdit()
+        self.mcp_url.setPlaceholderText("https://mcp.example.com/mcp   (streamable HTTP endpoint)")
+        mform.addRow("Server URL", self.mcp_url)
+        self.mcp_tool = QLineEdit()
+        self.mcp_tool.setPlaceholderText("tool name to call, e.g. ingest_meeting")
+        mform.addRow("Tool name", self.mcp_tool)
+        self.mcp_token = QLineEdit()
+        self.mcp_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.mcp_token.setPlaceholderText("bearer token (optional)")
+        mform.addRow("Token", self.mcp_token)
+        mtest_row = QHBoxLayout()
+        mtest = QPushButton("Send test call")
+        mtest.clicked.connect(self._test_mcp)
+        mtest_row.addWidget(mtest)
+        self.mcp_status = QLabel("")
+        self.mcp_status.setStyleSheet(_HINT)
+        mtest_row.addWidget(self.mcp_status, 1)
+        mform.addRow("", self._wrap(mtest_row))
+        mhint = QLabel("MCP needs the 'mcp' Python package (pip install mcp). The tool is called with "
+                       "title, summary, transcript, meeting_id, and team_id.")
+        mhint.setWordWrap(True)
+        mhint.setStyleSheet(_HINT)
+        mform.addRow("", mhint)
+        outer.addLayout(mform)
+        return box
+
+    def _current_delivery_cfg(self):
+        from .delivery import DeliveryConfig, McpConfig, RestConfig
+
+        return DeliveryConfig(
+            rest=RestConfig(
+                enabled=self.rest_enable.isChecked(), url=self.rest_url.text().strip(),
+                method=self.rest_method.currentText(), auth=self.rest_auth.text(),
+                headers=self.rest_headers.text().strip(),
+            ),
+            mcp=McpConfig(
+                enabled=self.mcp_enable.isChecked(), url=self.mcp_url.text().strip(),
+                tool=self.mcp_tool.text().strip(), token=self.mcp_token.text(),
+            ),
+        )
+
+    def _test_rest(self) -> None:
+        from .delivery import RestSink
+
+        cfg = self._current_delivery_cfg().rest
+        if not cfg.url:
+            self.rest_status.setText("⚠ Enter an endpoint URL.")
+            return
+        self.rest_status.setText("Sending…")
+        self._run_async(lambda: RestSink(cfg).test(),
+                        lambda m, ok: self.rest_status.setText(("✓ " if ok else "⚠ ") + m))
+
+    def _test_mcp(self) -> None:
+        from .delivery import McpSink
+
+        cfg = self._current_delivery_cfg().mcp
+        if not cfg.url or not cfg.tool:
+            self.mcp_status.setText("⚠ Enter the server URL and tool name.")
+            return
+        self.mcp_status.setText("Calling…")
+        self._run_async(lambda: McpSink(cfg).test(),
+                        lambda m, ok: self.mcp_status.setText(("✓ " if ok else "⚠ ") + m))
+
     def _current_email_cfg(self):
         from .email_send import EmailConfig, parse_recipients
 
@@ -1306,6 +1431,7 @@ class MainWindow(QWidget):
                     combo.setCurrentIndex(i)
         self._load_external_config()
         self._load_email_config()
+        self._load_integrations_config()
 
     # ----- external databases -----
     def _wire_external_persistence(self) -> None:
@@ -1319,6 +1445,12 @@ class MainWindow(QWidget):
                   self.email_from, self.email_recipients):
             w.textChanged.connect(self._persist_email)
         self.email_security.currentIndexChanged.connect(self._persist_email)
+        for w in (self.rest_enable, self.mcp_enable):
+            w.toggled.connect(self._persist_integrations)
+        for w in (self.rest_url, self.rest_auth, self.rest_headers,
+                  self.mcp_url, self.mcp_tool, self.mcp_token):
+            w.textChanged.connect(self._persist_integrations)
+        self.rest_method.currentIndexChanged.connect(self._persist_integrations)
 
     def _persist_external(self) -> None:
         if self._loading:
@@ -1347,6 +1479,38 @@ class MainWindow(QWidget):
         s("email.from", self.email_from.text().strip())
         s("email.security", self.email_security.currentData() or "starttls")
         s("email.recipients", self.email_recipients.text().strip())
+
+    def _persist_integrations(self) -> None:
+        if self._loading:
+            return
+        s = self.store.set_setting
+        s("rest.enabled", "1" if self.rest_enable.isChecked() else "0")
+        s("rest.url", self.rest_url.text().strip())
+        s("rest.method", self.rest_method.currentText())
+        s("rest.auth", self.rest_auth.text())
+        s("rest.headers", self.rest_headers.text().strip())
+        s("mcp.enabled", "1" if self.mcp_enable.isChecked() else "0")
+        s("mcp.url", self.mcp_url.text().strip())
+        s("mcp.tool", self.mcp_tool.text().strip())
+        s("mcp.token", self.mcp_token.text())
+
+    def _load_integrations_config(self) -> None:
+        prev, self._loading = self._loading, True
+        try:
+            g = self.store.get_setting
+            self.rest_enable.setChecked(g("rest.enabled") == "1")
+            self.rest_url.setText(g("rest.url") or "")
+            mi = self.rest_method.findText(g("rest.method") or "POST")
+            if mi >= 0:
+                self.rest_method.setCurrentIndex(mi)
+            self.rest_auth.setText(g("rest.auth") or "")
+            self.rest_headers.setText(g("rest.headers") or "")
+            self.mcp_enable.setChecked(g("mcp.enabled") == "1")
+            self.mcp_url.setText(g("mcp.url") or "")
+            self.mcp_tool.setText(g("mcp.tool") or "")
+            self.mcp_token.setText(g("mcp.token") or "")
+        finally:
+            self._loading = prev
 
     def _load_email_config(self) -> None:
         prev, self._loading = self._loading, True
@@ -1458,6 +1622,9 @@ class MainWindow(QWidget):
                 return "no record"
             prev = self._prev_meeting_id(meeting_id, rec.get("user"))
             res = external.push_meeting(rec, cfg, [prev] if prev else None)
+            for k, v in res.items():
+                if v == "ok":
+                    self.store.mark_sent(meeting_id, k)  # dedup future bulk sync
             bad = [f"{k}: {v}" for k, v in res.items() if v != "ok"]
             return "External sync failed — " + "; ".join(bad) if bad else "ok"
 
@@ -1685,6 +1852,62 @@ class MainWindow(QWidget):
 
         self._run_async(work, on_done or (
             lambda m, ok: self.status_label.setText(("✓ " if ok else "⚠ ") + m)))
+
+    # ----- unified send (email / REST / MCP / DB) with dedup -----
+    def _destination_availability(self) -> dict:
+        """Which send destinations are configured right now."""
+        ext = self._current_external_cfg()
+        em = self._current_email_cfg()
+        dv = self._current_delivery_cfg()
+        return {
+            "email": bool(em.host),
+            "rest": bool(dv.rest.enabled and dv.rest.url),
+            "mcp": bool(dv.mcp.enabled and dv.mcp.url and dv.mcp.tool),
+            "relational": bool(ext.relational.enabled and ext.relational.url),
+            "graph": bool(ext.graph.enabled and (ext.graph.graph_store_url or ext.graph.update_url)),
+        }
+
+    def _send_meeting_to(self, rec: dict, dest: str) -> None:
+        """Send one meeting record to one destination. Raises on failure."""
+        import json as _json
+
+        if dest == "email":
+            from .email_send import send
+            cfg = self._current_email_cfg()
+            recips = self._default_recipients()
+            if not cfg.host:
+                raise RuntimeError("Email not configured")
+            if not recips:
+                raise RuntimeError("no recipients")
+            md = rec.get("summary_md") or ""
+            send(cfg, recips, f"Meeting notes: {rec.get('title') or 'Meeting'}", md, self._md_to_html(md))
+        elif dest == "rest":
+            from .delivery import RestSink, payload_for
+            RestSink(self._current_delivery_cfg().rest).send(payload_for(rec))
+        elif dest == "mcp":
+            from .delivery import McpSink, _mcp_arguments
+            McpSink(self._current_delivery_cfg().mcp).send(_mcp_arguments(rec))
+        elif dest == "relational":
+            from .external import RelationalSink
+            r = self._current_external_cfg().relational
+            RelationalSink(r.url, r.user, r.password).upsert(rec)
+        elif dest == "graph":
+            from .external import GraphSink
+            g = self._current_external_cfg().graph
+            summary = {}
+            if rec.get("summary_json"):
+                try:
+                    summary = _json.loads(rec["summary_json"])
+                except Exception:
+                    summary = {}
+            prev = self._prev_meeting_id(rec["id"], rec.get("user"))
+            rec["links"] = self.store.get_links(rec["id"])
+            GraphSink(g).push_meeting(rec, summary, [prev] if prev else None, links=rec["links"])
+        else:
+            raise ValueError(f"unknown destination {dest}")
+
+    def _open_send_dialog(self, meeting_ids, title: str) -> None:
+        SendDialog(self, meeting_ids, title).exec()
 
     def _email_live_summary(self) -> None:
         md = self._last_summary_md
@@ -2370,6 +2593,10 @@ class MeetingDetailDialog(QDialog):
         em.setToolTip("Email this meeting's notes to your team")
         em.clicked.connect(self._email)
         row.addWidget(em)
+        snd = QPushButton("Send…")
+        snd.setToolTip("Send this meeting to REST API / MCP / databases (skips already-sent)")
+        snd.clicked.connect(lambda: self._parent._open_send_dialog([self._mid], "Send this meeting"))
+        row.addWidget(snd)
         rdf = QPushButton("Export RDF…")
         rdf.setToolTip("Export this meeting as a knowledge graph (JSON-LD / Turtle), "
                        "with key terms linked to Wikipedia/Wikidata and links to previous meetings.")
@@ -2621,6 +2848,113 @@ class EmailComposeDialog(QDialog):
         self._win._send_summary_email(
             recips, self.subject_edit.text().strip() or "Meeting notes",
             self._text, self._html, target_id=self._target_id, on_done=done)
+
+
+class SendDialog(QDialog):
+    """Send / sync one or many meetings to chosen destinations, skipping
+    anything already delivered there."""
+
+    DESTS = [
+        ("email", "Email"), ("rest", "REST API"), ("mcp", "MCP server"),
+        ("relational", "Relational database"), ("graph", "Graph database"),
+    ]
+
+    def __init__(self, main_window, meeting_ids, title: str = "Send"):
+        super().__init__(main_window)
+        self._win = main_window
+        self._ids = list(meeting_ids)
+        self.setWindowTitle(title)
+        self.setWindowIcon(app_icon())
+        self.resize(440, 360)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        head = QLabel(f"Send {len(self._ids)} meeting(s) to:")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+
+        avail = main_window._destination_availability()
+        self.checks: dict[str, QCheckBox] = {}
+        for key, label in self.DESTS:
+            cb = QCheckBox(label)
+            if avail.get(key):
+                cb.setChecked(True)
+            else:
+                cb.setEnabled(False)
+                cb.setToolTip("Not configured — set it up in Configuration first.")
+                cb.setText(f"{label}  (not configured)")
+            self.checks[key] = cb
+            v.addWidget(cb)
+
+        self.skip_check = QCheckBox("Skip meetings already sent to that destination")
+        self.skip_check.setChecked(True)
+        v.addWidget(self.skip_check)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#64748b; font-size:11px;")
+        self.status.setWordWrap(True)
+        v.addWidget(self.status)
+        v.addStretch()
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.clicked.connect(self._run)
+        row.addWidget(self.send_btn)
+        v.addLayout(row)
+
+    def _run(self) -> None:
+        dests = [k for k, cb in self.checks.items() if cb.isChecked() and cb.isEnabled()]
+        if not dests:
+            self.status.setText("⚠ Pick at least one destination.")
+            return
+        skip = self.skip_check.isChecked()
+        ids, win = self._ids, self._win
+        self.status.setText("Sending…")
+        self.send_btn.setEnabled(False)
+
+        def work():
+            sent = skipped = 0
+            errs: list[str] = []
+            for mid in ids:
+                rec = win.store.get_meeting(mid)
+                if not rec:
+                    continue
+                for dest in dests:
+                    if skip and win.store.is_sent(mid, dest):
+                        skipped += 1
+                        continue
+                    try:
+                        win._send_meeting_to(rec, dest)
+                        win.store.mark_sent(mid, dest)
+                        sent += 1
+                    except Exception as exc:
+                        errs.append(f"#{mid} {dest}: {exc}")
+            try:
+                from . import external
+                entry = win.store.log_action(
+                    "bulk_send", win._display_name, win.user_email, win.team_id or None, None,
+                    f"{sent} sent, {skipped} skipped, {len(errs)} errors; dests={','.join(dests)}")
+                xcfg = win._current_external_cfg()
+                if xcfg.relational.enabled and xcfg.relational.url:
+                    external.push_audit(entry, xcfg)
+            except Exception:
+                pass
+            msg = f"Sent {sent}; skipped {skipped} already-sent."
+            if errs:
+                msg += f"  {len(errs)} error(s): " + " | ".join(errs[:3])
+            return msg
+
+        def done(msg, ok):
+            self.status.setText(msg)
+            self.send_btn.setEnabled(True)
+
+        win._run_async(work, done)
 
 
 class WelcomeDialog(QDialog):
