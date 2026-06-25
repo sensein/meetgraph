@@ -179,7 +179,16 @@ class OpenAITranscriber(Transcriber):
         kwargs = {"model": self.model, "file": ("audio.wav", wav, "audio/wav")}
         if self.language:
             kwargs["language"] = self.language
-        resp = self.client.audio.transcriptions.create(**kwargs)
+        try:
+            resp = self.client.audio.transcriptions.create(**kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            if "model" in msg.lower() and ("not" in msg.lower() or "invalid" in msg.lower() or "404" in msg):
+                raise RuntimeError(
+                    f"Model '{self.model}' isn't a valid transcription model. Use whisper-1, "
+                    f"gpt-4o-transcribe, or gpt-4o-mini-transcribe (realtime models aren't supported "
+                    f"by /audio/transcriptions). [{exc}]") from exc
+            raise
         return (resp.text or "").strip()
 
 

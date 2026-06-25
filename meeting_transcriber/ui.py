@@ -514,6 +514,7 @@ class MainWindow(QWidget):
             status = "" if team_mode else self._meeting_status(m.get("id"))
             self.meetings_table.setItem(r, 4, QTableWidgetItem(status))
         self.meetings_table.setSortingEnabled(True)
+        self.meetings_table.sortItems(1, Qt.SortOrder.DescendingOrder)  # latest meeting on top
         scope = "team (shared DB)" if team_mode else "local"
         self.meetings_count.setText(
             note or (f"{len(rows)} {scope} meeting(s)"
@@ -2816,10 +2817,15 @@ class MainWindow(QWidget):
 
     def _on_start(self) -> None:
         sources = []
+        # With diarization on, don't assume the recorder is the speaker — use a
+        # neutral source label (the diarizer overrides it with Speaker N when
+        # available; otherwise lines stay neutral rather than the recorder's name).
+        diar_on = self.diarize_combo.currentData() == "local"
+        mic_label = "Mic" if diar_on else self.speaker_self
         if self.mic_check.isChecked():
             dev = self._device_by_index(self.mic_combo.currentData())
             if dev:
-                sources.append((dev, self.speaker_self))
+                sources.append((dev, mic_label))
         if self.sys_check.isChecked():
             dev = self._device_by_index(self.sys_combo.currentData())
             if dev:
@@ -2925,13 +2931,23 @@ class MainWindow(QWidget):
         ):
             w.setEnabled(enabled)
 
+    _SPK_PALETTE = ["#7c3aed", "#db2777", "#ea580c", "#0891b2", "#65a30d", "#9333ea", "#c026d3", "#0d9488"]
+
+    def _speaker_color(self, speaker: str) -> str:
+        if speaker == self.speaker_self:
+            return SPEAKER_COLORS["You"]
+        if speaker in SPEAKER_COLORS:
+            return SPEAKER_COLORS[speaker]
+        if not hasattr(self, "_speaker_colors"):
+            self._speaker_colors = {}
+        if speaker not in self._speaker_colors:
+            self._speaker_colors[speaker] = self._SPK_PALETTE[len(self._speaker_colors) % len(self._SPK_PALETTE)]
+        return self._speaker_colors[speaker]
+
     def _on_new_text(self, speaker: str, ts: datetime, text: str) -> None:
         self.transcript.add(speaker, text, when=ts)
         self._summary_dirty = True  # triggers auto-summary on the next tick
-        if speaker == self.speaker_self:
-            color = SPEAKER_COLORS["You"]  # the local user keeps the blue chip
-        else:
-            color = SPEAKER_COLORS.get(speaker, SPEAKER_COLORS["Meeting"])
+        color = self._speaker_color(speaker)
         chip = (
             f'<span style="background:{color}1a; color:{color};'
             f' font-weight:700; padding:1px 6px; border-radius:4px;">{speaker}</span>'
