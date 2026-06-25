@@ -39,11 +39,13 @@ from .transcript import Transcript, reveal_in_file_manager
 
 SPEAKER_COLORS = {"You": "#2563eb", "Meeting": "#0d9488"}
 
-LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
+LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"        # full lockup (icon + wordmark)
+ICON_PATH = Path(__file__).parent / "assets" / "logo_icon.png"   # icon only (for header / app icon)
 
 
 def app_icon() -> QIcon:
-    return QIcon(str(LOGO_PATH)) if LOGO_PATH.exists() else QIcon()
+    p = ICON_PATH if ICON_PATH.exists() else LOGO_PATH
+    return QIcon(str(p)) if p.exists() else QIcon()
 
 STYLESHEET = """
 * { font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", sans-serif; }
@@ -445,11 +447,12 @@ class MainWindow(QWidget):
         row.setContentsMargins(2, 0, 2, 2)
         row.setSpacing(12)
 
-        if LOGO_PATH.exists():
+        header_logo = ICON_PATH if ICON_PATH.exists() else LOGO_PATH
+        if header_logo.exists():
             logo = QLabel()
             logo.setPixmap(
-                QPixmap(str(LOGO_PATH)).scaled(
-                    QSize(52, 52),
+                QPixmap(str(header_logo)).scaled(
+                    QSize(56, 56),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -1001,15 +1004,15 @@ class GlobusLoginDialog(QDialog):
             logo = QLabel()
             logo.setPixmap(
                 QPixmap(str(LOGO_PATH)).scaled(
-                    QSize(64, 64), Qt.AspectRatioMode.KeepAspectRatio,
+                    QSize(200, 200), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
             logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(logo)
 
-        title = QLabel("Welcome to MeetGraph")
-        title.setObjectName("HeaderTitle")
+        title = QLabel("Turning meetings into a knowledge graph")
+        title.setObjectName("HeaderSubtitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(title)
 
