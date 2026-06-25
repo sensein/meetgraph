@@ -69,6 +69,11 @@ class Store:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
             )
+        # The DB holds API keys — keep it readable only by the owner.
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
         with self._connect() as con:

@@ -226,9 +226,13 @@ class MainWindow(QWidget):
         self._meeting_id = None
         self._last_summary_md = ""
         self._last_summary_json = ""
+        self._loading = True  # suppress config saves while widgets are built/loaded
 
         self._build_ui()
         self._wire_controller()
+        self._load_config()
+        self._wire_config_persistence()
+        self._loading = False
 
     # ---------------------------------------------------------------- UI build
     def _build_ui(self) -> None:
@@ -678,20 +682,27 @@ class MainWindow(QWidget):
 
         key = self.ai_provider.currentData()
         default_model, default_base, needs_base = self._providers[key]
-        self._set_model_list(default_models(key), select=default_model)
-        self.ai_base.setText(default_base or "")
-        self.ai_base.setPlaceholderText(
-            "required (e.g. http://localhost:11434/v1)" if needs_base
-            else (default_base or "default endpoint")
-        )
         env = {
             "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
             "openrouter": "OPENROUTER_API_KEY", "opensource": "",
         }.get(key, "")
-        self.ai_key.setText(os.environ.get(env, "") if env else "")
+        # Prefer per-provider saved values, then env var, then defaults.
+        saved_model = self.store.get_setting(f"ai.model.{key}")
+        saved_key = self.store.get_setting(f"ai.key.{key}")
+        saved_base = self.store.get_setting(f"ai.base.{key}")
+
+        self._set_model_list(default_models(key), select=saved_model or default_model)
+        self.ai_base.setText(saved_base if saved_base is not None else (default_base or ""))
+        self.ai_base.setPlaceholderText(
+            "required (e.g. http://localhost:11434/v1)" if needs_base
+            else (default_base or "default endpoint")
+        )
+        self.ai_key.setText(saved_key if saved_key is not None else (os.environ.get(env, "") if env else ""))
         self.ai_key.setPlaceholderText(
             "not required for most local servers" if key == "opensource" else "API key"
         )
+        if not self._loading:
+            self.store.set_setting("ai.provider", key)
         self._refresh_models()  # live fetch in the background
 
     def _refresh_models(self) -> None:
@@ -712,6 +723,82 @@ class MainWindow(QWidget):
             self.notes_status.setText(f"{len(models)} models available.")
         else:
             self.notes_status.setText("")
+
+    # ----- config persistence (so settings + keys survive restarts) -----
+    def _wire_config_persistence(self) -> None:
+        self.ai_model.currentTextChanged.connect(self._save_ai_fields)
+        self.ai_key.textChanged.connect(self._save_ai_fields)
+        self.ai_base.textChanged.connect(self._save_ai_fields)
+        self.auto_notes.toggled.connect(self._persist_config)
+        self.auto_refresh.toggled.connect(self._persist_config)
+        self.engine_combo.currentIndexChanged.connect(self._persist_config)
+        self.lang_edit.textChanged.connect(self._persist_config)
+        self.model_combo.currentTextChanged.connect(self._persist_config)
+        self.api_key_edit.textChanged.connect(self._persist_config)
+        self.openai_model_combo.currentTextChanged.connect(self._persist_config)
+        self.mic_combo.currentIndexChanged.connect(self._persist_config)
+        self.sys_combo.currentIndexChanged.connect(self._persist_config)
+
+    def _save_ai_fields(self) -> None:
+        if self._loading:
+            return
+        p = self.ai_provider.currentData()
+        self.store.set_setting(f"ai.model.{p}", self.ai_model.currentText().strip())
+        self.store.set_setting(f"ai.key.{p}", self.ai_key.text().strip())
+        self.store.set_setting(f"ai.base.{p}", self.ai_base.text().strip())
+
+    def _persist_config(self) -> None:
+        if self._loading:
+            return
+        s = self.store.set_setting
+        s("ai.provider", self.ai_provider.currentData() or "")
+        s("ui.auto_notes", "1" if self.auto_notes.isChecked() else "0")
+        s("ui.auto_refresh", "1" if self.auto_refresh.isChecked() else "0")
+        s("t.engine", self.engine_combo.currentData() or "")
+        s("t.language", self.lang_edit.text())
+        s("t.local_model", self.model_combo.currentText())
+        s("t.openai_key", self.api_key_edit.text())
+        s("t.openai_model", self.openai_model_combo.currentText())
+        s("t.mic_device", self.mic_combo.currentText())
+        s("t.sys_device", self.sys_combo.currentText())
+        self._save_ai_fields()
+
+    def _load_config(self) -> None:
+        g = self.store.get_setting
+        prov = g("ai.provider")
+        if prov:
+            i = self.ai_provider.findData(prov)
+            if i >= 0:
+                self.ai_provider.setCurrentIndex(i)  # triggers per-provider field load
+        eng = g("t.engine")
+        if eng:
+            i = self.engine_combo.findData(eng)
+            if i >= 0:
+                self.engine_combo.setCurrentIndex(i)
+        lang = g("t.language")
+        if lang is not None:
+            self.lang_edit.setText(lang)
+        lm = g("t.local_model")
+        if lm:
+            self.model_combo.setCurrentText(lm)
+        ok = g("t.openai_key")
+        if ok is not None:
+            self.api_key_edit.setText(ok)
+        om = g("t.openai_model")
+        if om:
+            self.openai_model_combo.setCurrentText(om)
+        an = g("ui.auto_notes")
+        if an is not None:
+            self.auto_notes.setChecked(an == "1")
+        ar = g("ui.auto_refresh")
+        if ar is not None:
+            self.auto_refresh.setChecked(ar == "1")
+        for combo, k in ((self.mic_combo, "t.mic_device"), (self.sys_combo, "t.sys_device")):
+            name = g(k)
+            if name:
+                i = combo.findText(name)
+                if i >= 0:
+                    combo.setCurrentIndex(i)
 
     # ----- live meeting summary -----
     def _notes_ready(self) -> bool:
