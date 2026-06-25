@@ -276,6 +276,7 @@ class MainWindow(QWidget):
         self.tabs.addTab(self._build_record_tab(), "  ◉  Meeting  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
+        self.tabs.addTab(self._build_about_tab(), "  ℹ  About  ")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
@@ -661,6 +662,93 @@ class MainWindow(QWidget):
         scroll.setWidget(page)
         scroll.viewport().setStyleSheet("background: transparent;")
         return scroll
+
+    def _build_about_tab(self) -> QWidget:
+        view = QTextBrowser()
+        view.setObjectName("transcript")
+        view.setOpenExternalLinks(True)
+        view.setHtml(self._about_html())
+        return view
+
+    def _about_html(self) -> str:
+        return """
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; color:#1e293b; font-size:14px; line-height:1.55; }
+  h1 { font-size:22px; margin:0 0 2px 0; }
+  h2 { font-size:15px; color:#7c3aed; margin:22px 0 6px 0; }
+  .tag { color:#64748b; font-size:13px; margin:0 0 4px 0; }
+  ol, ul { margin:4px 0 4px 0; padding-left:22px; }
+  li { margin:4px 0; }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 16px; margin-top:14px; }
+  a { color:#2563eb; text-decoration:none; }
+</style>
+
+<h1>MeetGraph</h1>
+<p class="tag">Turning meetings into a knowledge graph.</p>
+<p>MeetGraph transcribes a meeting on your machine, writes faithful structured
+notes with AI, and links the result into a queryable knowledge graph — with
+provenance, team sharing, and optional links to prior meetings and scientific
+literature.</p>
+
+<h2>Getting started in 4 steps</h2>
+<ol>
+  <li><b>Configure once.</b> Open the <b>⚙ Configuration</b> tab. Pick a
+      <b>Transcription engine</b> (local Whisper runs fully offline; OpenAI / any
+      OpenAI-compatible endpoint needs an API key + base URL). Under <b>AI notes</b>,
+      choose a provider and paste its API key. Use the <b>Test</b> buttons to confirm
+      both work.</li>
+  <li><b>Start a meeting.</b> Go to <b>◉ Meeting</b> and click
+      <b>● Start meeting</b>. The banner at the top shows which models are in use and
+      whether the API keys are set. Speak, or play the call audio.</li>
+  <li><b>Watch it transcribe & summarize.</b> The <b>Live transcript</b> fills in on
+      the left with on-device speaker labels (Speaker 1 / 2 / …). The
+      <b>Live summary</b> on the right refreshes automatically (toggle <b>Auto</b>).
+      Click <b>■ Stop</b> when done — a final summary is generated and saved.</li>
+  <li><b>Review & share.</b> Open the <b>✦ Summary</b> tab to browse every saved
+      meeting. Click one to read the notes + transcript, rename or edit it, find
+      related papers, export RDF, or send it by email / REST / MCP.</li>
+</ol>
+
+<h2>What you get in the notes</h2>
+<ul>
+  <li><b>Key points, decisions, open questions and action items</b> — faithful to
+      what was actually said (transcription errors are quietly corrected).</li>
+  <li><b>Key terms</b> auto-linked to Wikipedia &amp; Wikidata.</li>
+  <li><b>Related meetings</b> — an agent connects this meeting to earlier ones; click
+      a link to open it.</li>
+  <li><b>Scientific literature</b> (optional) — for research meetings, relevant
+      PubMed papers (PMID/DOI) and research gaps, when PubMed is enabled.</li>
+  <li><b>Provenance</b> — which transcription and notes models produced the result,
+      recorded in the notes and in the knowledge graph.</li>
+</ul>
+
+<h2>Speakers &amp; the summary</h2>
+<p>Speaker labels (Speaker 1, Speaker 2, …) appear in the <b>live transcript</b> only.
+The <b>summary</b> describes <i>what was said</i>, not a per-person breakdown — it lists
+participants by name only when a name is actually spoken.</p>
+
+<h2>Teams &amp; storage</h2>
+<ul>
+  <li><b>Local first.</b> Everything is saved to a local database. Content and your
+      API keys/secrets are kept in separate files.</li>
+  <li><b>External databases.</b> Optionally mirror meetings to a relational DB
+      (PostgreSQL / MySQL / MongoDB) and a graph DB (Oxigraph / GraphDB / Fuseki / …).
+      MeetGraph derives the right endpoints from a base URL and auto-syncs changes.</li>
+  <li><b>Teams.</b> Generate a team key so teammates write to one shared database;
+      access is by key + name + email, with an activity log of who did what.</li>
+</ul>
+
+<h2>Privacy</h2>
+<p>Local transcription and speaker labeling run entirely on your device. Audio is sent
+to a cloud service only if you choose a cloud transcription or notes provider. API keys
+are stored locally in a protected config file.</p>
+
+<div class="card">
+  <b>Developer</b><br>
+  Tek Raj Chhetri &nbsp;·&nbsp; <a href="mailto:tekraj@mit.edu">tekraj@mit.edu</a>
+</div>
+"""
 
     def _build_engine_box(self) -> QGroupBox:
         engine_box = QGroupBox("Transcription engine")
