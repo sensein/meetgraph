@@ -65,6 +65,22 @@ _GRAPH_KEYS = {
 }
 
 
+def save_config(set_setting, cfg: ExternalConfig) -> None:
+    """Persist an ExternalConfig into the settings store (inverse of load_config)."""
+    r, g = cfg.relational, cfg.graph
+    set_setting(_REL_KEYS["enabled"], "1" if r.enabled else "0")
+    set_setting(_REL_KEYS["url"], r.url)
+    set_setting(_REL_KEYS["user"], r.user)
+    set_setting(_REL_KEYS["password"], r.password)
+    set_setting(_GRAPH_KEYS["enabled"], "1" if g.enabled else "0")
+    set_setting(_GRAPH_KEYS["query_url"], g.query_url)
+    set_setting(_GRAPH_KEYS["graph_store_url"], g.graph_store_url)
+    set_setting(_GRAPH_KEYS["update_url"], g.update_url)
+    set_setting(_GRAPH_KEYS["named_graph"], g.named_graph)
+    set_setting(_GRAPH_KEYS["user"], g.user)
+    set_setting(_GRAPH_KEYS["password"], g.password)
+
+
 def load_config(get_setting) -> ExternalConfig:
     def b(v):
         return (v or "0") == "1"

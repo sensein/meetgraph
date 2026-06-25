@@ -2375,10 +2375,11 @@ class WelcomeDialog(QDialog):
         super().__init__()
         self.setWindowTitle("MeetGraph")
         self.setWindowIcon(app_icon())
-        self.resize(460, 460)
+        self.resize(480, 560)
         self.user_name = default_name
         self.user_email = default_email
         self.meeting_name = ""
+        self.team_key = ""
         self._ask_name = ask_name
 
         v = QVBoxLayout(self)
@@ -2432,6 +2433,23 @@ class WelcomeDialog(QDialog):
         self.meeting_edit.returnPressed.connect(self._continue)
         v.addWidget(self.meeting_edit)
 
+        tlbl = QLabel("Join a team (optional)")
+        tlbl.setStyleSheet("font-weight:600;")
+        v.addWidget(tlbl)
+        trow = QHBoxLayout()
+        self.team_key_edit = QLineEdit()
+        self.team_key_edit.setPlaceholderText("Paste a team key to join — your notes sync to the shared database")
+        trow.addWidget(self.team_key_edit, 1)
+        self.team_key_status = QLabel("")
+        self.team_key_status.setStyleSheet("font-size:11px;")
+        trow.addWidget(self.team_key_status)
+        v.addLayout(trow)
+        thint = QLabel("Don't have a key? Continue, then create a team in Configuration once your "
+                       "database is set — generated keys are shareable from there.")
+        thint.setWordWrap(True)
+        thint.setStyleSheet("color:#64748b; font-size:11px;")
+        v.addWidget(thint)
+
         v.addStretch()
         cont = QPushButton("Continue →")
         cont.setObjectName("primary")
@@ -2443,6 +2461,16 @@ class WelcomeDialog(QDialog):
             self.user_name = self.name_edit.text().strip()
             self.user_email = self.email_edit.text().strip()
         self.meeting_name = self.meeting_edit.text().strip()
+        key = self.team_key_edit.text().strip()
+        if key:
+            from . import team
+            try:
+                team.parse_team_key(key)  # validate before proceeding
+            except ValueError:
+                self.team_key_status.setText("⚠ invalid key")
+                self.team_key_status.setStyleSheet("color:#dc2626; font-size:11px;")
+                return
+            self.team_key = key
         self.accept()
 
 
@@ -2507,6 +2535,23 @@ def run() -> None:
     if dlg.user_email and not saved_email:
         store.set_setting("user_email", dlg.user_email)
 
+    # Quick join: a team key pasted on the welcome screen applies the shared
+    # database config + team identity before the window builds.
+    joined_team = ""
+    if dlg.team_key:
+        from . import external, team
+
+        try:
+            parsed = team.parse_team_key(dlg.team_key)
+            external.save_config(store.set_setting, parsed["external"])
+            store.set_setting("team.id", parsed["id"])
+            store.set_setting("team.name", parsed["team"])
+            joined_team = parsed["team"]
+        except Exception:
+            pass
+
     win = MainWindow(user_name=user_name, meeting_name=dlg.meeting_name, user_email=user_email)
+    if joined_team:
+        win._audit("team_joined", None, joined_team)
     win.show()
     sys.exit(app.exec())
