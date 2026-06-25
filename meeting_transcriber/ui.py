@@ -502,7 +502,7 @@ class MainWindow(QWidget):
         openai_w = QWidget()
         openai_l = QHBoxLayout(openai_w)
         openai_l.setContentsMargins(0, 0, 0, 0)
-        openai_l.addWidget(QLabel("API key:"))
+        openai_l.addWidget(QLabel("API key (required):"))
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("sk-…  (or set OPENAI_API_KEY)")
@@ -517,6 +517,17 @@ class MainWindow(QWidget):
         self.engine_stack.addWidget(openai_w)
 
         engine_layout.addWidget(self.engine_stack)
+
+        # HuggingFace token — optional; only used to download local Whisper models
+        # faster / past anonymous rate limits.
+        hf_row = QHBoxLayout()
+        hf_row.addWidget(QLabel("HuggingFace token (optional):"))
+        self.hf_token_edit = QLineEdit()
+        self.hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_token_edit.setPlaceholderText("hf_…  — speeds up local-model downloads (not required)")
+        self.hf_token_edit.setText(os.environ.get("HF_TOKEN", os.environ.get("HUGGING_FACE_HUB_TOKEN", "")))
+        hf_row.addWidget(self.hf_token_edit, 1)
+        engine_layout.addLayout(hf_row)
         return engine_box
 
     def _build_sources_box(self) -> QGroupBox:
@@ -635,11 +646,13 @@ class MainWindow(QWidget):
         outer.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("API key:"))
+        self.ai_key_label = QLabel("API key:")
+        row2.addWidget(self.ai_key_label)
         self.ai_key = QLineEdit()
         self.ai_key.setEchoMode(QLineEdit.EchoMode.Password)
         row2.addWidget(self.ai_key, 1)
-        row2.addWidget(QLabel("Base URL:"))
+        self.ai_base_label = QLabel("Base URL:")
+        row2.addWidget(self.ai_base_label)
         self.ai_base = QLineEdit()
         row2.addWidget(self.ai_base, 1)
         outer.addLayout(row2)
@@ -690,9 +703,16 @@ class MainWindow(QWidget):
         self.ai_key.setPlaceholderText(
             "not required for most local servers" if key == "opensource" else "API key"
         )
+        # Mark which fields are required vs optional for this provider.
+        if key == "opensource":
+            self.ai_key_label.setText("API key (optional):")
+            self.ai_base_label.setText("Base URL (required):")
+        else:
+            self.ai_key_label.setText("API key (required):")
+            self.ai_base_label.setText("Base URL (optional):")
         if not self._loading:
             self.store.set_setting("ai.provider", key)
-        self._refresh_models()  # live fetch in the background
+        self._refresh_models()  # live fetch in the background (reads Ollama's model list)
 
     def _refresh_models(self) -> None:
         key = self.ai_provider.currentData()
@@ -727,6 +747,13 @@ class MainWindow(QWidget):
         self.openai_model_combo.currentTextChanged.connect(self._persist_config)
         self.mic_combo.currentIndexChanged.connect(self._persist_config)
         self.sys_combo.currentIndexChanged.connect(self._persist_config)
+        self.hf_token_edit.textChanged.connect(self._persist_config)
+
+    def _apply_hf_token(self) -> None:
+        token = self.hf_token_edit.text().strip()
+        if token:
+            os.environ["HF_TOKEN"] = token
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = token
 
     def _save_ai_fields(self) -> None:
         if self._loading:
@@ -750,6 +777,8 @@ class MainWindow(QWidget):
         s("t.openai_model", self.openai_model_combo.currentText())
         s("t.mic_device", self.mic_combo.currentText())
         s("t.sys_device", self.sys_combo.currentText())
+        s("t.hf_token", self.hf_token_edit.text())
+        self._apply_hf_token()
         self._save_ai_fields()
 
     def _load_config(self) -> None:
@@ -782,6 +811,10 @@ class MainWindow(QWidget):
         ar = g("ui.auto_refresh")
         if ar is not None:
             self.auto_refresh.setChecked(ar == "1")
+        hf = g("t.hf_token")
+        if hf:
+            self.hf_token_edit.setText(hf)
+        self._apply_hf_token()
         for combo, k in ((self.mic_combo, "t.mic_device"), (self.sys_combo, "t.sys_device")):
             name = g(k)
             if name:
