@@ -38,8 +38,31 @@ def _float_to_wav_bytes(audio: np.ndarray, rate: int = 16_000) -> bytes:
     return buf.getvalue()
 
 
+def detect_compute() -> tuple[str, str, str]:
+    """Pick the best CTranslate2 device/precision and a human-readable label.
+
+    NVIDIA CUDA GPUs are used with float16; otherwise CPU with int8. Note:
+    CTranslate2 (faster-whisper) has no Apple-Metal/MPS backend, so on a Mac
+    this resolves to CPU even though the machine has a GPU.
+    """
+    try:
+        import ctranslate2
+
+        n = ctranslate2.get_cuda_device_count()
+        if n and n > 0:
+            return "cuda", "float16", f"GPU · CUDA ×{n}"
+    except Exception:
+        pass
+    return "cpu", "int8", "CPU"
+
+
 class LocalWhisperTranscriber(Transcriber):
-    """On-device transcription via faster-whisper (CTranslate2)."""
+    """On-device transcription via faster-whisper (CTranslate2).
+
+    ``model_size`` may be a preset (tiny/base/small/medium/large-v3) **or** any
+    HuggingFace CTranslate2 Whisper repo id / local path (e.g.
+    ``deepdml/faster-whisper-large-v3-turbo-ct2``).
+    """
 
     def __init__(
         self,
@@ -50,9 +73,12 @@ class LocalWhisperTranscriber(Transcriber):
     ):
         from faster_whisper import WhisperModel  # lazy: heavy import
 
-        # CTranslate2 has no CUDA on macOS; "auto" -> CPU with int8 here.
-        if compute_type == "auto":
-            compute_type = "int8"
+        if device == "auto" or compute_type == "auto":
+            d, c, _ = detect_compute()
+            device = d if device == "auto" else device
+            compute_type = c if compute_type == "auto" else compute_type
+        self.device = device
+        self.compute_type = compute_type
         self.language = language or None
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
 

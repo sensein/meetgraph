@@ -492,11 +492,20 @@ class MainWindow(QWidget):
         local_l.setContentsMargins(0, 0, 0, 0)
         local_l.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
+        self.model_combo.setEditable(True)  # type any HuggingFace CTranslate2 Whisper id
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.addItems([
+            "tiny", "base", "small", "medium", "large-v3",
+            "deepdml/faster-whisper-large-v3-turbo-ct2",
+        ])
         self.model_combo.setCurrentText("base")
-        local_l.addWidget(self.model_combo)
-        local_l.addWidget(QLabel("(larger = more accurate, slower)"))
-        local_l.addStretch()
+        self.model_combo.setMinimumWidth(280)
+        self.model_combo.setToolTip("Preset size or any HuggingFace CTranslate2 Whisper repo id")
+        local_l.addWidget(self.model_combo, 1)
+        from .transcribe import detect_compute
+        self._compute_label = QLabel(f"· Compute: {detect_compute()[2]}")
+        self._compute_label.setStyleSheet("color:#64748b;")
+        local_l.addWidget(self._compute_label)
         self.engine_stack.addWidget(local_w)
 
         openai_w = QWidget()
@@ -627,6 +636,10 @@ class MainWindow(QWidget):
         self.ai_provider = QComboBox()
         for key in PROVIDERS:
             self.ai_provider.addItem(PROVIDER_LABELS[key], key)
+        # Default to open-source/local models (overridden by saved config, if any).
+        _default_i = self.ai_provider.findData("opensource")
+        if _default_i >= 0:
+            self.ai_provider.setCurrentIndex(_default_i)
         self.ai_provider.currentIndexChanged.connect(self._on_ai_provider_changed)
         row1.addWidget(self.ai_provider)
         row1.addWidget(QLabel("Model:"))
