@@ -250,6 +250,7 @@ class MainWindow(QWidget):
         self._view_json = ""
         self._summary_dirty = False   # new speech since last summary
         self._notes_busy = False      # a summary generation is in flight
+        self._processing: set = set()  # (meeting_id, stage) currently being enriched
         self._loading = True  # suppress config saves while widgets are built/loaded
 
         self._build_ui()
@@ -257,6 +258,8 @@ class MainWindow(QWidget):
         self._load_config()
         self._wire_config_persistence()
         self._loading = False
+        self._update_proc_status()
+        QTimer.singleShot(1500, self._resume_pending)  # finish any interrupted enrichment
 
     # ---------------------------------------------------------------- UI build
     def _build_ui(self) -> None:
@@ -422,8 +425,8 @@ class MainWindow(QWidget):
         srow.addWidget(graph_btn)
         v.addLayout(srow)
 
-        self.meetings_table = QTableWidget(0, 4)
-        self.meetings_table.setHorizontalHeaderLabels(["Meeting", "Date", "Participant", "Summary"])
+        self.meetings_table = QTableWidget(0, 5)
+        self.meetings_table.setHorizontalHeaderLabels(["Meeting", "Date", "Participant", "Summary", "Status"])
         self.meetings_table.verticalHeader().setVisible(False)
         self.meetings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.meetings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -435,6 +438,7 @@ class MainWindow(QWidget):
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.meetings_table.setStyleSheet(
             "QTableWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;gridline-color:#eef1f6;}"
             "QHeaderView::section{background:#f1f5f9;border:none;padding:8px;font-weight:700;color:#475569;}"
@@ -498,11 +502,26 @@ class MainWindow(QWidget):
             self.meetings_table.setItem(r, 1, QTableWidgetItem(when))
             self.meetings_table.setItem(r, 2, QTableWidgetItem(m.get("user") or ""))
             self.meetings_table.setItem(r, 3, QTableWidgetItem("✦ yes" if m.get("summary_md") else "—"))
+            status = "" if team_mode else self._meeting_status(m.get("id"))
+            self.meetings_table.setItem(r, 4, QTableWidgetItem(status))
         self.meetings_table.setSortingEnabled(True)
         scope = "team (shared DB)" if team_mode else "local"
         self.meetings_count.setText(
             note or (f"{len(rows)} {scope} meeting(s)"
                      + (f" matching “{query}”" if query else "") + " · click a row to open"))
+
+    def _meeting_status(self, meeting_id) -> str:
+        """Per-meeting enrichment status for the Summary table."""
+        if meeting_id is None:
+            return ""
+        try:
+            jobs = self.store.jobs_for(meeting_id)
+        except Exception:
+            return ""
+        if any(v == "pending" for v in jobs.values()) or any(
+                mid == meeting_id for mid, _ in self._processing):
+            return "⏳ processing"
+        return "✓ done"
 
     def _fetch_team_meetings(self, query: str):
         """Return (rows, note). rows=None means the shared DB isn't available."""
@@ -1280,6 +1299,11 @@ class MainWindow(QWidget):
         title_col.addWidget(subtitle)
         row.addLayout(title_col)
         row.addStretch()
+
+        self.proc_label = QLabel("")
+        self.proc_label.setStyleSheet("color:#64748b; font-size:11px;")
+        self.proc_label.setToolTip("Background enrichment (cross-linking, literature) status")
+        row.addWidget(self.proc_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.identity_label = QLabel()
         self.identity_label.setStyleSheet("color:#475569; font-weight:600; font-size:12px;")
@@ -2180,9 +2204,71 @@ class MainWindow(QWidget):
         EmailComposeDialog(self, self._default_recipients(), subject, md,
                            self._md_to_html(md), target_id=self._meeting_id).exec()
 
-    def _crosslink_async(self, meeting_id) -> None:
+    # ----- background enrichment pipeline (status + resume) -----
+    def _target_stages(self) -> list[str]:
+        stages = ["crosslink"]
+        if self.pubmed_enable.isChecked():
+            stages.append("literature")
+        return stages
+
+    def _update_proc_status(self) -> None:
+        if not hasattr(self, "proc_label"):
+            return
+        mids = {mid for mid, _ in self._processing}
+        self.proc_label.setText(f"⏳ Processing {len(mids)} meeting(s)…" if mids else "✓ All processed")
+
+    def _process_meeting(self, meeting_id, force: bool = False) -> None:
+        """Run the enrichment stages this meeting still needs (status-tracked, resumable)."""
+        if meeting_id is None:
+            return
+        done = {} if force else self.store.jobs_for(meeting_id)
+        for stage in self._target_stages():
+            if done.get(stage) == "done":
+                continue
+            self.store.mark_job(meeting_id, stage, "pending")
+            self._start_stage(meeting_id, stage)
+
+    def _start_stage(self, meeting_id, stage: str) -> None:
+        key = (meeting_id, stage)
+        if key in self._processing:
+            return
+        self._processing.add(key)
+        self._update_proc_status()
+
+        def finish():
+            try:
+                self.store.mark_job(meeting_id, stage, "done")
+            except Exception:
+                pass
+            self._processing.discard(key)
+            self._update_proc_status()
+            self._refresh_meetings()  # reflect the new status in the table
+
+        if stage == "crosslink":
+            self._crosslink_async(meeting_id, on_finish=finish)
+        elif stage == "literature":
+            self._literature_async(meeting_id, on_finish=finish)
+        else:
+            finish()
+
+    def _resume_pending(self) -> None:
+        """On startup, finish enrichment that was interrupted (status='pending')."""
+        try:
+            pending = self.store.pending_jobs()
+        except Exception:
+            return
+        targets = set(self._target_stages())
+        for mid, stage in pending:
+            if stage in targets:
+                self._start_stage(mid, stage)
+            else:
+                self.store.mark_job(mid, stage, "done")  # no longer applicable — clear it
+
+    def _crosslink_async(self, meeting_id, on_finish=None) -> None:
         """Let the agent link this meeting to related ones, across the team if centralized."""
         if meeting_id is None:
+            if on_finish:
+                on_finish()
             return
         cfg = self._current_external_cfg()
         provider_cfg = {
@@ -2246,12 +2332,16 @@ class MainWindow(QWidget):
             if msg:
                 self._set_summary_status(msg)
             self._refresh_meetings()  # reflects a remote-only purge
+            if on_finish:
+                on_finish()
 
         self._run_async(work, done)
 
-    def _literature_async(self, meeting_id) -> None:
+    def _literature_async(self, meeting_id, on_finish=None) -> None:
         """For a scientific meeting, attach relevant PubMed papers + research gaps."""
         if meeting_id is None or not self.pubmed_enable.isChecked():
+            if on_finish:
+                on_finish()
             return
         api_key = self.pubmed_token.text().strip()
         try:
@@ -2295,6 +2385,8 @@ class MainWindow(QWidget):
                     self._last_summary_json = rec.get("summary_json") or ""
                     self.summary_view.setMarkdown(rec["summary_md"])
                 self._push_external_async(meeting_id)
+            if on_finish:
+                on_finish()
 
         self._run_async(work, done)
 
@@ -2395,8 +2487,7 @@ class MainWindow(QWidget):
             # agent link this meeting to related ones. (Skipped on live ticks.)
             if not self.controller.running:
                 self._audit("summary_generated", self._meeting_id)
-                self._crosslink_async(self._meeting_id)
-                self._literature_async(self._meeting_id)
+                self._process_meeting(self._meeting_id)  # crosslink + literature (status-tracked)
 
     def _on_notes_failed(self, msg: str) -> None:
         self._notes_busy = False
@@ -3409,15 +3500,18 @@ class WelcomeDialog(QDialog):
     The name is shown only the first time — once saved it's reused silently.
     """
 
-    def __init__(self, default_name: str = "", ask_name: bool = True, default_email: str = ""):
+    def __init__(self, default_name: str = "", ask_name: bool = True, default_email: str = "",
+                 current_team: str = ""):
         super().__init__()
         self.setWindowTitle("MeetGraph")
         self.setWindowIcon(app_icon())
-        self.resize(480, 560)
+        self.resize(480, 600)
         self.user_name = default_name
         self.user_email = default_email
         self.meeting_name = ""
         self.team_key = ""
+        self.leave_team = False
+        self._current_team = current_team
         self._ask_name = ask_name
 
         v = QVBoxLayout(self)
@@ -3471,12 +3565,21 @@ class WelcomeDialog(QDialog):
         self.meeting_edit.returnPressed.connect(self._continue)
         v.addWidget(self.meeting_edit)
 
-        tlbl = QLabel("Join a team (optional)")
+        self.leave_check = None
+        if current_team:
+            info = QLabel(f"✓ You're in team: {current_team}")
+            info.setStyleSheet("color:#0d9488; font-weight:600;")
+            v.addWidget(info)
+            self.leave_check = QCheckBox("Leave this team")
+            v.addWidget(self.leave_check)
+
+        tlbl = QLabel("Switch / join a team (optional)" if current_team else "Join a team (optional)")
         tlbl.setStyleSheet("font-weight:600;")
         v.addWidget(tlbl)
         trow = QHBoxLayout()
         self.team_key_edit = QLineEdit()
         self.team_key_edit.setPlaceholderText("Paste a team key to join — your notes sync to the shared database")
+        self.team_key_edit.textChanged.connect(self._preview_key)
         trow.addWidget(self.team_key_edit, 1)
         self.team_key_status = QLabel("")
         self.team_key_status.setStyleSheet("font-size:11px;")
@@ -3494,7 +3597,23 @@ class WelcomeDialog(QDialog):
         cont.clicked.connect(self._continue)
         v.addWidget(cont)
 
+    def _preview_key(self) -> None:
+        t = self.team_key_edit.text().strip()
+        if not t:
+            self.team_key_status.setText("")
+            return
+        try:
+            from . import team
+            p = team.parse_team_key(t)
+            self.team_key_status.setText(f"→ join {p['team'] or 'team'}")
+            self.team_key_status.setStyleSheet("color:#0d9488; font-size:11px;")
+        except Exception:
+            self.team_key_status.setText("⚠ invalid")
+            self.team_key_status.setStyleSheet("color:#dc2626; font-size:11px;")
+
     def _continue(self) -> None:
+        if self.leave_check is not None:
+            self.leave_team = self.leave_check.isChecked()
         if self._ask_name:
             self.user_name = self.name_edit.text().strip()
             self.user_email = self.email_edit.text().strip()
@@ -3562,7 +3681,9 @@ def run() -> None:
     # Show the welcome screen only when we don't yet know the user's name;
     # afterwards the saved name is reused silently. The meeting name is asked
     # each run (it's optional and changes meeting-to-meeting).
-    dlg = WelcomeDialog(default_name=saved_name, ask_name=not saved_name, default_email=saved_email)
+    current_team = (store.get_setting("team.name") or "").strip()
+    dlg = WelcomeDialog(default_name=saved_name, ask_name=not saved_name,
+                        default_email=saved_email, current_team=current_team)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return  # closing the welcome screen (X / Esc) exits the app
 
@@ -3572,6 +3693,13 @@ def run() -> None:
     user_email = saved_email or dlg.user_email
     if dlg.user_email and not saved_email:
         store.set_setting("user_email", dlg.user_email)
+
+    # Leaving the team on the welcome screen clears the membership.
+    left_team = ""
+    if dlg.leave_team and current_team:
+        store.set_setting("team.id", "")
+        store.set_setting("team.name", "")
+        left_team = current_team
 
     # Quick join: a team key pasted on the welcome screen applies the shared
     # database config + team identity before the window builds.
@@ -3589,6 +3717,8 @@ def run() -> None:
             pass
 
     win = MainWindow(user_name=user_name, meeting_name=dlg.meeting_name, user_email=user_email)
+    if left_team and not joined_team:
+        win._audit("team_left", None, left_team)
     if joined_team:
         win._audit("team_joined", None, joined_team)
     win.show()

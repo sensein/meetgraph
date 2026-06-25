@@ -108,6 +108,19 @@ class Store:
                 )
                 """
             )
+            # Background enrichment jobs per meeting (cross-linking, literature…),
+            # so processing can show status and resume if interrupted.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meeting_jobs (
+                    meeting_id  INTEGER,
+                    stage       TEXT,
+                    status      TEXT,
+                    updated_at  TEXT,
+                    PRIMARY KEY (meeting_id, stage)
+                )
+                """
+            )
             # Team keys this user has generated (for viewing / revoking).
             con.execute(
                 """
@@ -272,6 +285,28 @@ class Store:
         with self._connect() as con:
             con.execute("UPDATE team_keys SET revoked = ? WHERE key_id = ?",
                         (1 if revoked else 0, key_id))
+
+    def mark_job(self, meeting_id: int, stage: str, status: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO meeting_jobs(meeting_id, stage, status, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(meeting_id, stage) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
+                (meeting_id, stage, status, datetime.now().isoformat(timespec="seconds")),
+            )
+
+    def jobs_for(self, meeting_id: int) -> dict:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT stage, status FROM meeting_jobs WHERE meeting_id = ?", (meeting_id,)
+            ).fetchall()
+            return {r["stage"]: r["status"] for r in rows}
+
+    def pending_jobs(self) -> list[tuple]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT meeting_id, stage FROM meeting_jobs WHERE status = 'pending'"
+            ).fetchall()
+            return [(r["meeting_id"], r["stage"]) for r in rows]
 
     def log_action(
         self,
