@@ -356,6 +356,10 @@ class MainWindow(QWidget):
         self.live_copy_btn = QPushButton("Copy")
         self.live_copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._last_summary_md))
         srow.addWidget(self.live_copy_btn)
+        self.live_email_btn = QPushButton("Email…")
+        self.live_email_btn.setToolTip("Email this summary to your team")
+        self.live_email_btn.clicked.connect(self._email_live_summary)
+        srow.addWidget(self.live_email_btn)
         rl.addLayout(srow)
         self.summary_view = QTextBrowser()
         self.summary_view.setObjectName("transcript")
@@ -535,6 +539,7 @@ class MainWindow(QWidget):
         v.addWidget(self._build_sources_box())
         v.addWidget(self._build_external_box())
         v.addWidget(self._build_team_box())
+        v.addWidget(self._build_email_box())
         v.addStretch()
 
         scroll = QScrollArea()
@@ -869,6 +874,93 @@ class MainWindow(QWidget):
         outer.addWidget(hint)
         self._update_team_status()
         return box
+
+    def _build_email_box(self) -> QGroupBox:
+        box = QGroupBox("Email — send summaries to your team (SMTP)")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+        form = QFormLayout()
+        row1 = QHBoxLayout()
+        self.email_host = QLineEdit()
+        self.email_host.setPlaceholderText("smtp.gmail.com")
+        row1.addWidget(self.email_host, 1)
+        row1.addWidget(QLabel("Port:"))
+        self.email_port = QLineEdit("587")
+        self.email_port.setMaximumWidth(70)
+        row1.addWidget(self.email_port)
+        row1.addWidget(QLabel("Security:"))
+        self.email_security = QComboBox()
+        self.email_security.addItem("STARTTLS", "starttls")
+        self.email_security.addItem("SSL", "ssl")
+        self.email_security.addItem("None", "none")
+        row1.addWidget(self.email_security)
+        form.addRow("SMTP server", self._wrap(row1))
+        self.email_user = QLineEdit()
+        self.email_user.setPlaceholderText("username (often your email)")
+        form.addRow("Username", self.email_user)
+        self.email_pass = QLineEdit()
+        self.email_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.email_pass.setPlaceholderText("password or app-specific password")
+        form.addRow("Password", self.email_pass)
+        self.email_from = QLineEdit()
+        self.email_from.setPlaceholderText("from address (defaults to username)")
+        form.addRow("From", self.email_from)
+        self.email_recipients = QLineEdit()
+        self.email_recipients.setPlaceholderText("team@example.com, alice@example.com  (comma-separated)")
+        form.addRow("Default recipients", self.email_recipients)
+        outer.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        test = QPushButton("Send test email")
+        test.clicked.connect(self._send_test_email)
+        btn_row.addWidget(test)
+        fill = QPushButton("Fill from team members")
+        fill.setToolTip("Add the email addresses of teammates seen in the activity log.")
+        fill.clicked.connect(self._fill_team_recipients)
+        btn_row.addWidget(fill)
+        self.email_status = QLabel("")
+        self.email_status.setStyleSheet("color:#64748b; font-size:11px;")
+        btn_row.addWidget(self.email_status, 1)
+        outer.addLayout(btn_row)
+        return box
+
+    def _current_email_cfg(self):
+        from .email_send import EmailConfig, parse_recipients
+
+        try:
+            port = int(self.email_port.text().strip() or "587")
+        except ValueError:
+            port = 587
+        return EmailConfig(
+            host=self.email_host.text().strip(), port=port,
+            username=self.email_user.text().strip(), password=self.email_pass.text(),
+            from_addr=self.email_from.text().strip(),
+            security=self.email_security.currentData() or "starttls",
+            recipients=parse_recipients(self.email_recipients.text()),
+        )
+
+    def _fill_team_recipients(self) -> None:
+        from .email_send import parse_recipients
+
+        existing = parse_recipients(self.email_recipients.text())
+        team = self.store.team_emails(self.team_id or None)
+        merged = list(dict.fromkeys(existing + team))  # de-dupe, keep order
+        self.email_recipients.setText(", ".join(merged))
+
+    def _send_test_email(self) -> None:
+        from .email_send import send
+
+        cfg = self._current_email_cfg()
+        recips = cfg.recipients or ([cfg.from_addr or cfg.username] if (cfg.from_addr or cfg.username) else [])
+        if not cfg.host or not recips:
+            self.email_status.setText("⚠ Set the SMTP server and at least one recipient.")
+            return
+        self.email_status.setText("Sending test…")
+        self._run_async(
+            lambda: send(cfg, recips, "MeetGraph test email",
+                         "This is a test email from MeetGraph. Your SMTP settings work."),
+            lambda msg, ok: self.email_status.setText(("✓ " if ok else "⚠ ") + msg),
+        )
 
     def _update_team_status(self) -> None:
         if getattr(self, "team_status", None) is None:
@@ -1213,6 +1305,7 @@ class MainWindow(QWidget):
                 if i >= 0:
                     combo.setCurrentIndex(i)
         self._load_external_config()
+        self._load_email_config()
 
     # ----- external databases -----
     def _wire_external_persistence(self) -> None:
@@ -1222,6 +1315,10 @@ class MainWindow(QWidget):
                   self.ext_graph_store, self.ext_graph_update, self.ext_graph_query,
                   self.ext_graph_name, self.ext_graph_user, self.ext_graph_pass):
             w.textChanged.connect(self._persist_external)
+        for w in (self.email_host, self.email_port, self.email_user, self.email_pass,
+                  self.email_from, self.email_recipients):
+            w.textChanged.connect(self._persist_email)
+        self.email_security.currentIndexChanged.connect(self._persist_email)
 
     def _persist_external(self) -> None:
         if self._loading:
@@ -1238,6 +1335,35 @@ class MainWindow(QWidget):
         s("ext.graph.named_graph", self.ext_graph_name.text().strip())
         s("ext.graph.user", self.ext_graph_user.text().strip())
         s("ext.graph.password", self.ext_graph_pass.text())
+
+    def _persist_email(self) -> None:
+        if self._loading:
+            return
+        s = self.store.set_setting
+        s("email.host", self.email_host.text().strip())
+        s("email.port", self.email_port.text().strip())
+        s("email.username", self.email_user.text().strip())
+        s("email.password", self.email_pass.text())
+        s("email.from", self.email_from.text().strip())
+        s("email.security", self.email_security.currentData() or "starttls")
+        s("email.recipients", self.email_recipients.text().strip())
+
+    def _load_email_config(self) -> None:
+        prev, self._loading = self._loading, True
+        try:
+            g = self.store.get_setting
+            self.email_host.setText(g("email.host") or "")
+            self.email_port.setText(g("email.port") or "587")
+            self.email_user.setText(g("email.username") or "")
+            self.email_pass.setText(g("email.password") or "")
+            self.email_from.setText(g("email.from") or "")
+            sec = g("email.security") or "starttls"
+            i = self.email_security.findData(sec)
+            if i >= 0:
+                self.email_security.setCurrentIndex(i)
+            self.email_recipients.setText(g("email.recipients") or "")
+        finally:
+            self._loading = prev
 
     def _load_external_config(self) -> None:
         # Suppress per-widget persistence while loading, or each setText() would
@@ -1514,6 +1640,60 @@ class MainWindow(QWidget):
 
     def _show_activity_log(self) -> None:
         ActivityLogDialog(self).exec()
+
+    # ----- email -----
+    def _default_recipients(self) -> list[str]:
+        from .email_send import parse_recipients
+
+        recips = parse_recipients(self.email_recipients.text())
+        try:
+            recips = list(dict.fromkeys(recips + self.store.team_emails(self.team_id or None)))
+        except Exception:
+            pass
+        return recips
+
+    @staticmethod
+    def _md_to_html(md: str) -> str:
+        from PyQt6.QtGui import QTextDocument
+
+        doc = QTextDocument()
+        doc.setMarkdown(md or "")
+        return doc.toHtml()
+
+    def _send_summary_email(self, recipients, subject, text, html, target_id=None, on_done=None) -> None:
+        from .email_send import send
+
+        cfg = self._current_email_cfg()
+        if not cfg.host:
+            QMessageBox.warning(self, "Email not configured",
+                                "Set up your SMTP server in Configuration → Email first.")
+            return
+        name, email, team_id = self._display_name, self.user_email, self.team_id or None
+
+        def work():
+            msg = send(cfg, recipients, subject, text, html)
+            try:
+                from . import external
+                entry = self.store.log_action("email_sent", name, email, team_id, target_id,
+                                              f"to {len(recipients)}: {subject}")
+                xcfg = self._current_external_cfg()
+                if xcfg.relational.enabled and xcfg.relational.url:
+                    external.push_audit(entry, xcfg)
+            except Exception:
+                pass
+            return msg
+
+        self._run_async(work, on_done or (
+            lambda m, ok: self.status_label.setText(("✓ " if ok else "⚠ ") + m)))
+
+    def _email_live_summary(self) -> None:
+        md = self._last_summary_md
+        if not md.strip():
+            self._set_summary_status("No summary to email yet.")
+            return
+        subject = f"Meeting summary: {self.meeting_name or 'MeetGraph'}"
+        EmailComposeDialog(self, self._default_recipients(), subject, md,
+                           self._md_to_html(md), target_id=self._meeting_id).exec()
 
     def _crosslink_async(self, meeting_id) -> None:
         """Let the agent link this meeting to related ones, across the team if centralized."""
@@ -2186,6 +2366,10 @@ class MeetingDetailDialog(QDialog):
         exp.setObjectName("primary")
         exp.clicked.connect(self._export)
         row.addWidget(exp)
+        em = QPushButton("Email…")
+        em.setToolTip("Email this meeting's notes to your team")
+        em.clicked.connect(self._email)
+        row.addWidget(em)
         rdf = QPushButton("Export RDF…")
         rdf.setToolTip("Export this meeting as a knowledge graph (JSON-LD / Turtle), "
                        "with key terms linked to Wikipedia/Wikidata and links to previous meetings.")
@@ -2305,6 +2489,14 @@ class MeetingDetailDialog(QDialog):
         if path:
             reveal_in_file_manager(path)
 
+    def _email(self) -> None:
+        md = self._current_md()
+        subject = f"Meeting notes: {self._rec.get('title') or 'Meeting'}"
+        EmailComposeDialog(
+            self._parent, self._parent._default_recipients(), subject, md,
+            self._parent._md_to_html(md), target_id=self._mid,
+        ).exec()
+
     def _delete(self) -> None:
         if QMessageBox.question(
             self, "Delete meeting", "Delete this meeting from the local database? This cannot be undone."
@@ -2363,6 +2555,72 @@ class ActivityLogDialog(QDialog):
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         v.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+
+class EmailComposeDialog(QDialog):
+    """Compose + send a summary email to the team."""
+
+    def __init__(self, main_window, recipients: list[str], subject: str,
+                 text_md: str, html: str, target_id=None):
+        super().__init__(main_window)
+        self._win = main_window
+        self._text = text_md
+        self._html = html
+        self._target_id = target_id
+        self.setWindowTitle("Email summary")
+        self.setWindowIcon(app_icon())
+        self.resize(620, 560)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        form = QFormLayout()
+        self.to_edit = QLineEdit(", ".join(recipients))
+        self.to_edit.setPlaceholderText("recipient@example.com, …")
+        form.addRow("To", self.to_edit)
+        self.subject_edit = QLineEdit(subject)
+        form.addRow("Subject", self.subject_edit)
+        v.addLayout(form)
+
+        preview = QTextBrowser()
+        preview.setObjectName("transcript")
+        preview.setMarkdown(text_md)
+        v.addWidget(preview, 1)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#64748b; font-size:11px;")
+        v.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.clicked.connect(self._send)
+        row.addWidget(self.send_btn)
+        v.addLayout(row)
+
+    def _send(self) -> None:
+        from .email_send import parse_recipients
+
+        recips = parse_recipients(self.to_edit.text())
+        if not recips:
+            self.status.setText("⚠ Add at least one recipient.")
+            return
+        self.send_btn.setEnabled(False)
+        self.status.setText("Sending…")
+
+        def done(msg, ok):
+            self.status.setText(("✓ " if ok else "⚠ ") + msg)
+            self.send_btn.setEnabled(True)
+            if ok:
+                QTimer.singleShot(700, self.accept)
+
+        self._win._send_summary_email(
+            recips, self.subject_edit.text().strip() or "Meeting notes",
+            self._text, self._html, target_id=self._target_id, on_done=done)
 
 
 class WelcomeDialog(QDialog):

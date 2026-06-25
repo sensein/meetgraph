@@ -227,6 +227,20 @@ class Store:
             )
         return entry
 
+    def team_emails(self, team_id: str | None = None) -> list[str]:
+        """Distinct member emails seen in the audit log (optionally for a team)."""
+        with self._connect() as con:
+            if team_id:
+                rows = con.execute(
+                    "SELECT DISTINCT actor_email FROM audit_log WHERE team_id = ? AND actor_email <> ''",
+                    (team_id,),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT DISTINCT actor_email FROM audit_log WHERE actor_email <> ''"
+                ).fetchall()
+            return [r["actor_email"] for r in rows if r["actor_email"]]
+
     def list_audit(self, limit: int = 500) -> list[dict]:
         with self._connect() as con:
             rows = con.execute(
