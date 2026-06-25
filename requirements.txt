@@ -21,5 +21,10 @@ pydantic-ai-slim[anthropic,openai]>=2.0
 # Knowledge-graph storage + RDF export (JSON-LD / Turtle / N-Quads, SPARQL)
 pyoxigraph>=0.4
 
+# Optional: mirror meetings to an external relational database (PostgreSQL,
+# MySQL, …). Needs a DB driver too, e.g. psycopg2-binary (PostgreSQL) or
+# pymysql (MySQL). Graph-database (SPARQL) export uses the stdlib `urllib`.
+SQLAlchemy>=2.0
+
 # Local storage uses the stdlib `sqlite3` — no extra dependency.
 # Key-term -> Wikipedia/Wikidata linking uses the stdlib `urllib` — no extra dependency.

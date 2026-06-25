@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QCompleter,
     QDialog,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -501,6 +502,7 @@ class MainWindow(QWidget):
         v.addWidget(self._build_ai_section())
         v.addWidget(self._build_engine_box())
         v.addWidget(self._build_sources_box())
+        v.addWidget(self._build_external_box())
         v.addStretch()
 
         scroll = QScrollArea()
@@ -650,6 +652,89 @@ class MainWindow(QWidget):
         refresh_row.addWidget(self.bh_hint, 1)
         src_layout.addLayout(refresh_row)
         return src_box
+
+    def _build_external_box(self) -> QGroupBox:
+        box = QGroupBox("External databases — optionally mirror meetings to your own DB (all fields optional)")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(10)
+        _HINT = "color:#64748b; font-size:11px;"
+
+        # --- Relational ---
+        self.ext_rel_enable = QCheckBox("Relational database (PostgreSQL / MySQL / SQLite via SQLAlchemy)")
+        outer.addWidget(self.ext_rel_enable)
+        rel_form = QFormLayout()
+        rel_form.setContentsMargins(22, 0, 0, 0)
+        self.ext_rel_url = QLineEdit()
+        self.ext_rel_url.setPlaceholderText("postgresql+psycopg://user:password@host:5432/dbname")
+        rel_form.addRow("Connection URL", self.ext_rel_url)
+        rel_hint = QLabel("Needs SQLAlchemy + a driver (e.g. psycopg2-binary, pymysql). "
+                          "Writes a meetgraph_meetings table.")
+        rel_hint.setStyleSheet(_HINT)
+        rel_hint.setWordWrap(True)
+        rel_form.addRow("", rel_hint)
+        rel_btn_row = QHBoxLayout()
+        rel_test = QPushButton("Test connection")
+        rel_test.clicked.connect(self._test_relational)
+        rel_btn_row.addWidget(rel_test)
+        self.ext_rel_status = QLabel("")
+        self.ext_rel_status.setStyleSheet(_HINT)
+        rel_btn_row.addWidget(self.ext_rel_status, 1)
+        rel_form.addRow("", self._wrap(rel_btn_row))
+        outer.addLayout(rel_form)
+
+        # --- Graph ---
+        self.ext_graph_enable = QCheckBox("Graph database / triplestore (SPARQL — Oxigraph, Fuseki, GraphDB…)")
+        outer.addWidget(self.ext_graph_enable)
+        g_form = QFormLayout()
+        g_form.setContentsMargins(22, 0, 0, 0)
+        self.ext_graph_store = QLineEdit()
+        self.ext_graph_store.setPlaceholderText("http://localhost:7878/store   (Graph Store Protocol — preferred)")
+        g_form.addRow("Graph Store URL", self.ext_graph_store)
+        self.ext_graph_update = QLineEdit()
+        self.ext_graph_update.setPlaceholderText("http://localhost:7878/update   (SPARQL Update — fallback)")
+        g_form.addRow("Update URL", self.ext_graph_update)
+        self.ext_graph_query = QLineEdit()
+        self.ext_graph_query.setPlaceholderText("http://localhost:7878/query   (used to test the connection)")
+        g_form.addRow("Query URL", self.ext_graph_query)
+        self.ext_graph_user = QLineEdit()
+        self.ext_graph_user.setPlaceholderText("optional")
+        g_form.addRow("Username", self.ext_graph_user)
+        self.ext_graph_pass = QLineEdit()
+        self.ext_graph_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ext_graph_pass.setPlaceholderText("optional")
+        g_form.addRow("Password", self.ext_graph_pass)
+        g_hint = QLabel("Each meeting is written as its own named graph (replaced on re-sync), "
+                        "with key terms linked to Wikipedia/Wikidata.")
+        g_hint.setStyleSheet(_HINT)
+        g_hint.setWordWrap(True)
+        g_form.addRow("", g_hint)
+        g_btn_row = QHBoxLayout()
+        g_test = QPushButton("Test connection")
+        g_test.clicked.connect(self._test_graph)
+        g_btn_row.addWidget(g_test)
+        self.ext_graph_status = QLabel("")
+        self.ext_graph_status.setStyleSheet(_HINT)
+        g_btn_row.addWidget(self.ext_graph_status, 1)
+        g_form.addRow("", self._wrap(g_btn_row))
+        outer.addLayout(g_form)
+
+        # --- Sync all ---
+        sync_row = QHBoxLayout()
+        sync_btn = QPushButton("⇪ Sync all meetings now")
+        sync_btn.clicked.connect(self._sync_all_external)
+        sync_row.addWidget(sync_btn)
+        self.ext_sync_status = QLabel("Enabled databases also receive new meetings automatically.")
+        self.ext_sync_status.setStyleSheet(_HINT)
+        self.ext_sync_status.setWordWrap(True)
+        sync_row.addWidget(self.ext_sync_status, 1)
+        outer.addLayout(sync_row)
+        return box
+
+    @staticmethod
+    def _wrap(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
 
     def _build_header(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -869,6 +954,7 @@ class MainWindow(QWidget):
         self.sys_combo.currentIndexChanged.connect(self._persist_config)
         self.hf_token_edit.textChanged.connect(self._persist_config)
         self.compute_combo.currentIndexChanged.connect(self._persist_config)
+        self._wire_external_persistence()
 
     def _apply_hf_token(self) -> None:
         token = self.hf_token_edit.text().strip()
@@ -948,6 +1034,164 @@ class MainWindow(QWidget):
                 i = combo.findText(name)
                 if i >= 0:
                     combo.setCurrentIndex(i)
+        self._load_external_config()
+
+    # ----- external databases -----
+    def _wire_external_persistence(self) -> None:
+        for w in (self.ext_rel_enable, self.ext_graph_enable):
+            w.toggled.connect(self._persist_external)
+        for w in (self.ext_rel_url, self.ext_graph_store, self.ext_graph_update,
+                  self.ext_graph_query, self.ext_graph_user, self.ext_graph_pass):
+            w.textChanged.connect(self._persist_external)
+
+    def _persist_external(self) -> None:
+        if self._loading:
+            return
+        s = self.store.set_setting
+        s("ext.rel.enabled", "1" if self.ext_rel_enable.isChecked() else "0")
+        s("ext.rel.url", self.ext_rel_url.text().strip())
+        s("ext.graph.enabled", "1" if self.ext_graph_enable.isChecked() else "0")
+        s("ext.graph.graph_store_url", self.ext_graph_store.text().strip())
+        s("ext.graph.update_url", self.ext_graph_update.text().strip())
+        s("ext.graph.query_url", self.ext_graph_query.text().strip())
+        s("ext.graph.user", self.ext_graph_user.text().strip())
+        s("ext.graph.password", self.ext_graph_pass.text())
+
+    def _load_external_config(self) -> None:
+        # Suppress per-widget persistence while loading, or each setText() would
+        # re-save (clobbering fields not yet loaded in this pass).
+        prev, self._loading = self._loading, True
+        try:
+            g = self.store.get_setting
+            self.ext_rel_enable.setChecked(g("ext.rel.enabled") == "1")
+            self.ext_rel_url.setText(g("ext.rel.url") or "")
+            self.ext_graph_enable.setChecked(g("ext.graph.enabled") == "1")
+            self.ext_graph_store.setText(g("ext.graph.graph_store_url") or "")
+            self.ext_graph_update.setText(g("ext.graph.update_url") or "")
+            self.ext_graph_query.setText(g("ext.graph.query_url") or "")
+            self.ext_graph_user.setText(g("ext.graph.user") or "")
+            self.ext_graph_pass.setText(g("ext.graph.password") or "")
+        finally:
+            self._loading = prev
+
+    def _current_external_cfg(self):
+        from .external import ExternalConfig, GraphConfig, RelationalConfig
+
+        return ExternalConfig(
+            relational=RelationalConfig(
+                enabled=self.ext_rel_enable.isChecked(),
+                url=self.ext_rel_url.text().strip(),
+            ),
+            graph=GraphConfig(
+                enabled=self.ext_graph_enable.isChecked(),
+                query_url=self.ext_graph_query.text().strip(),
+                graph_store_url=self.ext_graph_store.text().strip(),
+                update_url=self.ext_graph_update.text().strip(),
+                user=self.ext_graph_user.text().strip(),
+                password=self.ext_graph_pass.text(),
+            ),
+        )
+
+    def _run_async(self, fn, on_done) -> None:
+        op = _AsyncOp(fn)
+        op.done.connect(on_done)
+        if not hasattr(self, "_async_ops"):
+            self._async_ops = []
+        self._async_ops.append(op)  # keep a reference until it finishes
+        threading.Thread(target=op.run, daemon=True).start()
+
+    def _test_relational(self) -> None:
+        from .external import RelationalSink
+
+        url = self.ext_rel_url.text().strip()
+        self.ext_rel_status.setText("Testing…")
+        self._run_async(
+            lambda: RelationalSink(url).test(),
+            lambda msg, ok: self.ext_rel_status.setText(("✓ " if ok else "⚠ ") + msg),
+        )
+
+    def _test_graph(self) -> None:
+        from .external import GraphSink
+
+        cfg = self._current_external_cfg().graph
+        self.ext_graph_status.setText("Testing…")
+        self._run_async(
+            lambda: GraphSink(cfg).test(),
+            lambda msg, ok: self.ext_graph_status.setText(("✓ " if ok else "⚠ ") + msg),
+        )
+
+    def _prev_meeting_id(self, meeting_id, user):
+        try:
+            ms = self.store.list_meetings(user=user or None, limit=1000)
+            earlier = [m.id for m in ms if meeting_id and m.id < meeting_id]
+            return max(earlier) if earlier else None
+        except Exception:
+            return None
+
+    def _push_external_async(self, meeting_id) -> None:
+        """Mirror one meeting to any enabled external DB, in the background."""
+        if meeting_id is None:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+
+        def work():
+            rec = self.store.get_meeting(meeting_id)
+            if not rec:
+                return "no record"
+            prev = self._prev_meeting_id(meeting_id, rec.get("user"))
+            res = external.push_meeting(rec, cfg, [prev] if prev else None)
+            bad = [f"{k}: {v}" for k, v in res.items() if v != "ok"]
+            return "External sync failed — " + "; ".join(bad) if bad else "ok"
+
+        def report(msg, ok):
+            if msg not in ("ok", "OK"):
+                self.status_label.setText(f"⚠ {msg}")
+
+        self._run_async(work, report)
+
+    def _sync_all_external(self) -> None:
+        from . import external
+
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            QMessageBox.information(
+                self, "Nothing enabled",
+                "Enable a relational or graph database (and set its connection details) first.",
+            )
+            return
+        try:
+            ids = [m.id for m in self.store.list_meetings(user=self.user or None, limit=5000)]
+        except Exception as exc:
+            self.ext_sync_status.setText(f"⚠ {exc}")
+            return
+        if not ids:
+            self.ext_sync_status.setText("No meetings to sync yet.")
+            return
+        self.ext_sync_status.setText(f"Syncing {len(ids)} meeting(s)…")
+
+        def work():
+            recs = [r for r in (self.store.get_meeting(i) for i in ids) if r]
+            prev_by_user: dict = {}
+            ok = 0
+            errs: list[str] = []
+            for rec in sorted(recs, key=lambda r: r["id"]):
+                prev = prev_by_user.get(rec.get("user"))
+                res = external.push_meeting(rec, cfg, [prev] if prev else None)
+                prev_by_user[rec.get("user")] = rec["id"]
+                for k, v in res.items():
+                    if v == "ok":
+                        ok += 1
+                    else:
+                        errs.append(f"#{rec['id']} {k}: {v}")
+            msg = f"Synced {ok} target-write(s) across {len(recs)} meeting(s)."
+            if errs:
+                msg += f"  {len(errs)} error(s): " + " | ".join(errs[:3])
+            return msg
+
+        self._run_async(work, lambda msg, ok: self.ext_sync_status.setText(msg))
 
     # ----- live meeting summary -----
     def _notes_ready(self) -> bool:
@@ -1007,6 +1251,7 @@ class MainWindow(QWidget):
                 self._refresh_meetings()
             except Exception:
                 pass
+            self._push_external_async(self._meeting_id)  # mirror to external DB(s)
 
     def _on_notes_failed(self, msg: str) -> None:
         self._notes_busy = False
@@ -1144,6 +1389,7 @@ class MainWindow(QWidget):
             )
             self.status_label.setText(f"Saved transcript to local database (#{self._meeting_id}).")
             self._refresh_meetings()
+            self._push_external_async(self._meeting_id)  # mirror to external DB(s)
         except Exception as exc:
             self.status_label.setText(f"⚠ Could not save to database: {exc}")
 
@@ -1271,6 +1517,23 @@ class PullWorker(QObject):
             self.done.emit(False, "ollama not found — install Ollama (ollama.com)")
         except Exception as exc:
             self.done.emit(False, str(exc))
+
+
+class _AsyncOp(QObject):
+    """Runs a blocking callable off the GUI thread and reports back via a signal."""
+
+    done = pyqtSignal(str, bool)  # message, ok
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self) -> None:
+        try:
+            msg = self._fn()
+            self.done.emit(msg or "OK", True)
+        except Exception as exc:
+            self.done.emit(f"{type(exc).__name__}: {exc}", False)
 
 
 class NotesWorker(QObject):

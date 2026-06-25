@@ -22,6 +22,7 @@ dependencies = [
     "openai>=1.30",
     "pydantic-ai-slim[anthropic,openai]>=2.0",
     "pyoxigraph>=0.4",
+    "SQLAlchemy>=2.0",
 ]
 
 [project.scripts]

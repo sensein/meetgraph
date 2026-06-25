@@ -1,0 +1,41 @@
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix ical: <http://www.w3.org/2002/12/cal/ical#> .
+@prefix mco: <https://tekrajchhetri.com/mco/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema: <http://schema.org/> .
+<https://tekrajchhetri.com/meetgraph/meeting/7> prov:wasInformedBy <https://tekrajchhetri.com/meetgraph/meeting/6> ;
+	mco:has_key_term <https://tekrajchhetri.com/meetgraph/meeting/7/term/base-of-green-gria> .
+<https://tekrajchhetri.com/meetgraph/meeting/7/term/base-of-green-gria> owl:sameAs <http://www.wikidata.org/entity/Q3914227> ;
+	rdfs:seeAlso <https://en.wikipedia.org/wiki/Greater_Rochester_International_Airport> ;
+	dcterms:description "Frederick Douglass Greater Rochester International Airport (IATA: ROC, ICAO: KROC, FAA LID: ROC) is a public airport located within the City of Rochester, three miles (4.8 km) southwest of Downtown, in Monroe County, New York, United States." ;
+	rdfs:label "Base of Green Gria" ;
+	skos:prefLabel "Base of Green Gria" ;
+	a mco:KeyTerm .
+<https://tekrajchhetri.com/meetgraph/meeting/7> mco:has_key_term <https://tekrajchhetri.com/meetgraph/meeting/7/term/mid-graph> .
+<https://tekrajchhetri.com/meetgraph/meeting/7/term/mid-graph> owl:sameAs <http://www.wikidata.org/entity/Q141488> ;
+	rdfs:seeAlso <https://en.wikipedia.org/wiki/Graph_%28discrete_mathematics%29> ;
+	dcterms:description "In discrete mathematics, particularly in graph theory, a graph is a structure consisting of a set of objects where some pairs of the objects are in some sense \"related\"." ;
+	rdfs:label "Mid-graph" ;
+	skos:prefLabel "Mid-graph" ;
+	a mco:KeyTerm .
+<https://tekrajchhetri.com/meetgraph/meeting/7> mco:has_topic <https://tekrajchhetri.com/meetgraph/meeting/7/topic/1> .
+<https://tekrajchhetri.com/meetgraph/meeting/7/topic/1> mco:point "and connect it to G and other profile information," , "and how we can best off gang there." , "Today we want to discuss about Base of Green Gria" ;
+	rdfs:label "Base of Green Gria" ;
+	skos:prefLabel "Base of Green Gria" ;
+	a mco:Topic .
+<https://tekrajchhetri.com/meetgraph/meeting/7> mco:has_topic <https://tekrajchhetri.com/meetgraph/meeting/7/topic/0> .
+<https://tekrajchhetri.com/meetgraph/meeting/7/topic/0> mco:point "and it also links to the Wikipedia." , "into structure and all this graph." , "lets you convert your meeting talks" , "Mid-graph is a new" ;
+	rdfs:label "Mid-graph" ;
+	skos:prefLabel "Mid-graph" ;
+	a mco:Topic .
+<https://tekrajchhetri.com/meetgraph/meeting/7> prov:wasAssociatedWith <https://tekrajchhetri.com/meetgraph/meeting/7/agent/tek-raj-chhetri> .
+<https://tekrajchhetri.com/meetgraph/meeting/7/agent/tek-raj-chhetri> foaf:name "Tek Raj Chhetri" ;
+	a mco:Agent .
+<https://tekrajchhetri.com/meetgraph/meeting/7> prov:atTime "2026-06-25T15:03:13.813938"^^<http://www.w3.org/2001/XMLSchema#dateTime> ;
+	dcterms:title "Meeting 2026-06-25 15:03" ;
+	rdfs:label "Meeting 2026-06-25 15:03" ;
+	a mco:Meeting .

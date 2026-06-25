@@ -37,14 +37,30 @@ class Meeting:
 
 
 class Store:
-    """Thin SQLite wrapper. One row per recorded meeting."""
+    """Thin SQLite wrapper over two separate databases.
 
-    def __init__(self, path: str | os.PathLike | None = None):
+    Content (one row per recorded meeting) lives in ``meetgraph.db``; user
+    configuration and secrets (API keys, external-DB credentials) live in a
+    *separate* ``meetgraph-config.db``. Keeping them apart means content can be
+    backed up, shared, or wiped without touching credentials, and vice versa.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike | None = None,
+        config_path: str | os.PathLike | None = None,
+    ):
         self.path = str(path or (data_dir() / "meetgraph.db"))
+        self.config_path = str(config_path or (data_dir() / "meetgraph-config.db"))
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def _connect_config(self) -> sqlite3.Connection:
+        con = sqlite3.connect(self.config_path)
         con.row_factory = sqlite3.Row
         return con
 
@@ -66,22 +82,47 @@ class Store:
                 )
                 """
             )
+        with self._connect_config() as con:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
             )
-        # The DB holds API keys — keep it readable only by the owner.
+        self._migrate_settings()
+        # Both DBs may hold secrets — keep them readable only by the owner.
+        for p in (self.path, self.config_path):
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
+
+    def _migrate_settings(self) -> None:
+        """One-time copy of settings from the old combined DB into the config DB."""
         try:
-            os.chmod(self.path, 0o600)
-        except OSError:
+            with self._connect_config() as cfg:
+                if cfg.execute("SELECT COUNT(*) FROM settings").fetchone()[0]:
+                    return  # config DB already populated
+            with self._connect() as con:
+                has = con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+                ).fetchone()
+                if not has:
+                    return
+                rows = con.execute("SELECT key, value FROM settings").fetchall()
+            if rows:
+                with self._connect_config() as cfg:
+                    cfg.executemany(
+                        "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+                        [(r["key"], r["value"]) for r in rows],
+                    )
+        except sqlite3.Error:
             pass
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
-        with self._connect() as con:
+        with self._connect_config() as con:
             row = con.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else default
 
     def set_setting(self, key: str, value: str) -> None:
-        with self._connect() as con:
+        with self._connect_config() as con:
             con.execute(
                 "INSERT INTO settings(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
