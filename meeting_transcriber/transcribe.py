@@ -207,6 +207,7 @@ def make_transcriber(config: dict) -> Transcriber:
             api_key=config.get("api_key", ""),
             model=config.get("openai_model", "whisper-1"),
             language=language,
+            base_url=config.get("base_url") or None,  # custom/Azure/proxy endpoint
         )
     if engine == "compatible":
         return OpenAITranscriber(

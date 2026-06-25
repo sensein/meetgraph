@@ -676,8 +676,17 @@ class MainWindow(QWidget):
         row.addWidget(QLabel("Language:"))
         self.lang_edit = QLineEdit()
         self.lang_edit.setPlaceholderText("auto (e.g. en, es, fr)")
-        self.lang_edit.setMaximumWidth(160)
+        self.lang_edit.setMaximumWidth(140)
         row.addWidget(self.lang_edit)
+        row.addWidget(QLabel("Speakers:"))
+        self.diarize_combo = QComboBox()
+        self.diarize_combo.addItem("Label speakers (local)", "local")
+        self.diarize_combo.addItem("Off (by source)", "off")
+        self.diarize_combo.setToolTip(
+            "Label distinct speakers (Speaker 1/2/…) using local diarization (pyannote + a "
+            "HuggingFace token). Cloud APIs like OpenAI don't return speaker labels, so this runs "
+            "on-device. If unavailable, falls back to labelling by audio source.")
+        row.addWidget(self.diarize_combo)
         row.addStretch()
         engine_layout.addLayout(row)
 
@@ -725,8 +734,12 @@ class MainWindow(QWidget):
             ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
         )
         self.openai_model_combo.setToolTip("Pick or type any OpenAI transcription model id")
-        self.openai_model_combo.setMinimumWidth(200)
+        self.openai_model_combo.setMinimumWidth(180)
         openai_l.addWidget(self.openai_model_combo)
+        openai_l.addWidget(QLabel("Base URL:"))
+        self.openai_base = QLineEdit()
+        self.openai_base.setPlaceholderText("optional — default https://api.openai.com/v1 (Azure/proxy ok)")
+        openai_l.addWidget(self.openai_base, 1)
         self.engine_stack.addWidget(openai_w)
 
         # OpenAI-compatible (Groq, OpenRouter, Anthropic, self-hosted, custom…)
@@ -1547,6 +1560,8 @@ class MainWindow(QWidget):
         self.model_combo.currentTextChanged.connect(self._persist_config)
         self.api_key_edit.textChanged.connect(self._persist_config)
         self.openai_model_combo.currentTextChanged.connect(self._persist_config)
+        self.openai_base.textChanged.connect(self._persist_config)
+        self.diarize_combo.currentIndexChanged.connect(self._persist_config)
         self.compat_provider.currentIndexChanged.connect(self._persist_config)
         self.compat_base.textChanged.connect(self._persist_config)
         self.compat_key.textChanged.connect(self._persist_config)
@@ -1591,6 +1606,8 @@ class MainWindow(QWidget):
         s("t.local_model", self.model_combo.currentText())
         s("t.openai_key", self.api_key_edit.text())
         s("t.openai_model", self.openai_model_combo.currentText())
+        s("t.openai_base", self.openai_base.text().strip())
+        s("t.diarization", self.diarize_combo.currentData() or "local")
         s("t.compat_provider", self.compat_provider.currentData() or "")
         s("t.compat_base", self.compat_base.text())
         s("t.compat_key", self.compat_key.text())
@@ -1635,6 +1652,14 @@ class MainWindow(QWidget):
         om = g("t.openai_model")
         if om:
             self.openai_model_combo.setCurrentText(om)
+        ob = g("t.openai_base")
+        if ob is not None:
+            self.openai_base.setText(ob)
+        diar = g("t.diarization")
+        if diar:
+            di = self.diarize_combo.findData(diar)
+            if di >= 0:
+                self.diarize_combo.setCurrentIndex(di)
         cp = g("t.compat_provider")
         if cp:
             i = self.compat_provider.findData(cp)
@@ -2643,7 +2668,8 @@ class MainWindow(QWidget):
         if eng == "local":
             return f"Whisper {cfg.get('model_size')} · {compute_label(cfg.get('device', 'auto'))} (local)"
         if eng == "openai":
-            return f"OpenAI {cfg.get('openai_model')}"
+            base = cfg.get("base_url")
+            return f"OpenAI {cfg.get('openai_model')}" + (f" @ {base}" if base else "")
         if eng == "compatible":
             return f"{cfg.get('openai_model')} @ {cfg.get('base_url')}"
         return str(eng)
@@ -2714,7 +2740,11 @@ class MainWindow(QWidget):
             "compute_type": {"cpu": "int8", "cuda": "float16"}.get(sel, "auto"),
             "api_key": self.api_key_edit.text().strip(),
             "openai_model": self.openai_model_combo.currentText().strip(),
+            "diarization": self.diarize_combo.currentData() or "local",
+            "hf_token": self.hf_token_edit.text().strip(),
         }
+        if engine == "openai":
+            config["base_url"] = self.openai_base.text().strip()
         if engine == "compatible":
             config["api_key"] = self.compat_key.text().strip()
             config["base_url"] = self.compat_base.text().strip()
@@ -2888,7 +2918,8 @@ class MainWindow(QWidget):
     def _set_settings_enabled(self, enabled: bool) -> None:
         for w in (
             self.engine_combo, self.model_combo, self.api_key_edit,
-            self.openai_model_combo, self.compat_provider, self.compat_base,
+            self.openai_model_combo, self.openai_base, self.diarize_combo,
+            self.compat_provider, self.compat_base,
             self.compat_key, self.compat_model, self.lang_edit, self.mic_check,
             self.sys_check, self.mic_combo, self.sys_combo,
         ):

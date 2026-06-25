@@ -35,6 +35,7 @@ class TranscriptionController(QObject):
         self._paused = False
         self._sources: list[tuple[InputDevice, str]] = []
         self._threshold = 0.012
+        self._diarizer = None
 
     @property
     def running(self) -> bool:
@@ -80,6 +81,22 @@ class TranscriptionController(QObject):
         except Exception as exc:
             self.error.emit(f"Could not start engine: {exc}")
             return
+
+        # Optional local speaker diarization (consistent Speaker N labels).
+        self._diarizer = None
+        if config.get("diarization") == "local":
+            try:
+                from .diarize import SpeakerLabeler
+
+                self.status.emit("Loading speaker diarization model…")
+                labeler = SpeakerLabeler(hf_token=config.get("hf_token") or None)
+                if labeler.available:
+                    self._diarizer = labeler
+                else:
+                    self.status.emit("Speaker labels off — install pyannote.audio + set a HuggingFace "
+                                     "token to enable. Labelling by audio source.")
+            except Exception:
+                self.status.emit("Speaker labels off (diarization unavailable). Labelling by source.")
 
         self._seg_queue = queue.Queue()
         self._running = True
@@ -127,7 +144,12 @@ class TranscriptionController(QObject):
                     self.error.emit(f"Transcription failed: {exc}")
                     continue
                 if text:
-                    self.new_text.emit(seg.label, datetime.now(), text)
+                    label = seg.label
+                    if self._diarizer is not None:
+                        spk = self._diarizer.label(seg.audio)
+                        if spk:  # anonymous, consistent speaker id across the meeting
+                            label = spk
+                    self.new_text.emit(label, datetime.now(), text)
         finally:
             try:
                 transcriber.close()
