@@ -36,6 +36,16 @@ MEETGRAPH_NG = "https://tekrajchhetri.com/meetgraph"  # the "meetgraph" named gr
 def team_iri(team_id) -> str:
     return f"{BASE}team/{team_id}"
 
+# Anonymous diarization / audio-source labels — never minted as graph agents.
+_ANON_SPEAKER_RE = re.compile(
+    r"^(person|speaker|participant)\s*[a-z0-9]+$|^(you|me|mic|meeting|system(\s*audio)?|unknown)$",
+    re.IGNORECASE,
+)
+
+
+def _is_anon_speaker(name: str) -> bool:
+    return bool(_ANON_SPEAKER_RE.match((name or "").strip()))
+
 RDF_TYPE = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
 RDFS_LABEL = NamedNode("http://www.w3.org/2000/01/rdf-schema#label")
 RDFS_SEEALSO = NamedNode("http://www.w3.org/2000/01/rdf-schema#seeAlso")
@@ -190,8 +200,8 @@ def quads_for_meeting(
     agents: dict[str, NamedNode] = {}
 
     def agent_for(name: str | None) -> NamedNode | None:
-        if not name or not name.strip():
-            return None
+        if not name or not name.strip() or _is_anon_speaker(name):
+            return None  # don't mint agents for anonymous diarization labels
         key = name.strip()
         node = agents.get(key.lower())
         if node is None:

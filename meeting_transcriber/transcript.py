@@ -32,8 +32,14 @@ class Transcript:
         self.started_at = None
 
     def to_plain(self) -> str:
-        """Speaker-labelled plain text — ideal input for the notes agent."""
+        """Speaker-labelled plain text (used for the on-screen/live transcript)."""
         return "\n".join(f"{e.speaker}: {e.text}" for e in self.entries)
+
+    def to_content(self) -> str:
+        """Spoken content without speaker/diarization labels — what the notes
+        agent summarizes. Keeping diarization (Speaker 1/2/…) out of the summary
+        means notes describe *what was said*, not a per-person breakdown."""
+        return "\n".join(e.text for e in self.entries)
 
     def to_markdown(self) -> str:
         lines: list[str] = [f"# {self.title}", ""]

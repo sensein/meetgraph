@@ -13,7 +13,19 @@ retries the model on a validation failure (the skill's "repair" step).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# Anonymous diarization / source labels (Person A, Speaker 1, You, Mic, Meeting,
+# System audio …) — kept in the live transcript but excluded from the summary.
+_ANON_SPEAKER_RE = re.compile(
+    r"^(person|speaker|participant)\s*[a-z0-9]+$|^(you|me|mic|meeting|system(\s*audio)?|unknown)$",
+    re.IGNORECASE,
+)
+
+
+def _is_anon_speaker(name: str) -> bool:
+    return bool(_ANON_SPEAKER_RE.match((name or "").strip()))
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, PromptedOutput
@@ -33,9 +45,9 @@ class MeetingInfo(BaseModel):
     date: str | None = Field(None, description="ISO 8601 date if explicitly stated, else null.")
     participants: list[str] = Field(
         default_factory=list,
-        description="Distinct participants. Use names explicitly stated in the conversation; for "
-        "unnamed speakers when several people take part, use 'Person A', 'Person B', …. Do not "
-        "assume all speech is one person or the recorder.",
+        description="Only people whose names are explicitly stated in the conversation. Do NOT "
+        "invent generic labels like 'Person A'/'Speaker 1' for unnamed speakers — leave them out. "
+        "If no names are stated, return an empty list.",
     )
     purpose: str | None = Field(None, description="Stated purpose, else null.")
 
@@ -128,14 +140,11 @@ might want to look up: named entities, technologies, tools, methods, standards, 
 domain concepts. Use the canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words and \
 anything not in the transcript. Leave the wikipedia/wikidata fields null — they are filled \
 automatically; never invent a URL.
-10a. Identify speakers, don't assume. The bracketed/leading speaker labels in the transcript are \
-AUDIO-SOURCE tags (the recorder's microphone, or the meeting/system audio) — NOT a verified roster, \
-and one source may carry several people. Infer the real participants from what is actually said \
-(names people use to address each other, self-introductions, turn-taking, Q&A). Use a real name only \
-when it is explicitly stated in the conversation. When multiple distinct speakers are clearly \
-involved but unnamed, label them "Person A", "Person B", … consistently. Never assume all speech \
-belongs to the recorder or to a single person just because the source tag repeats. Attribute topics/\
-owners using these same labels.
+10a. Summarize content, not speakers. The transcript has no speaker labels — write notes about \
+WHAT was said and decided, not a per-person, "Person A said… / Person B said…" breakdown. Only list \
+someone in `participants` (or attribute an action item to them) when their real name is explicitly \
+stated in the conversation. Do NOT invent generic labels like "Person A"/"Speaker 1"; if no names \
+are stated, leave participants empty and attribute action items by role or leave the owner null.
 10. Fix transcription errors. The text comes from automatic speech-to-text and contains \
 mis-recognised words, wrong homophones, dropped punctuation, and garbled proper nouns. Silently \
 correct obvious errors to the word the speaker clearly meant, using surrounding context (e.g. \
@@ -464,8 +473,11 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
     lines: list[str] = [f"# {title or m.title or 'Meeting Notes'}", ""]
     if m.date:
         lines += [f"*Date: {m.date}*", ""]
-    if m.participants:
-        lines += [f"*Participants: {', '.join(m.participants)}*", ""]
+    # Drop anonymous diarization labels (Person A / Speaker 1) — the summary lists
+    # only explicitly-named people, never a per-speaker breakdown.
+    named = [p for p in m.participants if not _is_anon_speaker(p)]
+    if named:
+        lines += [f"*Participants: {', '.join(named)}*", ""]
     if m.purpose:
         lines += [f"**Purpose:** {m.purpose}", ""]
 

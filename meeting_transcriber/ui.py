@@ -2546,7 +2546,9 @@ class MainWindow(QWidget):
         }
         # Incremental: once we have a running summary, only summarize the NEW
         # speech and merge it in — so long meetings stay fast and nothing is lost.
-        full = self.transcript.to_plain()
+        # Use content without diarization labels: the summary describes what was
+        # said, not a per-speaker breakdown (labels stay in the live transcript).
+        full = self.transcript.to_content()
         running = getattr(self, "_running_summary", None)
         done_chars = getattr(self, "_summarized_chars", 0)
         incremental = running is not None and len(full) > done_chars
