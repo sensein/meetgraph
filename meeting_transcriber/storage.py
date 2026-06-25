@@ -164,6 +164,20 @@ class Store:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
             )
+            # Teams this user belongs to. A user can join several teams (each an
+            # isolated shared scope) and switch the active one. The full key is
+            # kept so switching re-applies that team's shared-DB connection.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS team_memberships (
+                    team_id    TEXT PRIMARY KEY,
+                    team_name  TEXT,
+                    key_id     TEXT,
+                    key        TEXT,
+                    joined_at  TEXT
+                )
+                """
+            )
         self._migrate_settings()
         # Both DBs may hold secrets — keep them readable only by the owner.
         for p in (self.path, self.config_path):
@@ -291,6 +305,37 @@ class Store:
         with self._connect() as con:
             con.execute("UPDATE team_keys SET revoked = ? WHERE key_id = ?",
                         (1 if revoked else 0, key_id))
+
+    # ----- team memberships (the teams this user can switch between) -----
+    def add_membership(self, team_id: str, team_name: str, key_id: str, key: str,
+                       joined_at: str) -> None:
+        with self._connect_config() as con:
+            con.execute(
+                "INSERT INTO team_memberships(team_id, team_name, key_id, key, joined_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(team_id) DO UPDATE SET "
+                "team_name=excluded.team_name, key_id=excluded.key_id, key=excluded.key",
+                (team_id, team_name, key_id, key, joined_at),
+            )
+
+    def list_memberships(self) -> list[dict]:
+        with self._connect_config() as con:
+            rows = con.execute(
+                "SELECT team_id, team_name, key_id, key, joined_at FROM team_memberships "
+                "ORDER BY joined_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_membership(self, team_id: str) -> dict | None:
+        with self._connect_config() as con:
+            row = con.execute(
+                "SELECT team_id, team_name, key_id, key, joined_at FROM team_memberships "
+                "WHERE team_id = ?", (team_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def remove_membership(self, team_id: str) -> None:
+        with self._connect_config() as con:
+            con.execute("DELETE FROM team_memberships WHERE team_id = ?", (team_id,))
 
     def mark_job(self, meeting_id: int, stage: str, status: str) -> None:
         with self._connect() as con:

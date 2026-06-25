@@ -248,6 +248,9 @@ class MainWindow(QWidget):
             import secrets
             self._node_id = secrets.token_hex(8)
             self.store.set_setting("node.id", self._node_id)
+        # Read-only for the active team when its key has been revoked: the content
+        # stays accessible (view + feed), but no new writes go to its shared DB.
+        self._team_readonly = False
         self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
@@ -293,6 +296,20 @@ class MainWindow(QWidget):
 
         self._populate_devices()
         self._on_engine_changed()
+        self._init_team_state()
+
+    def _init_team_state(self) -> None:
+        """On startup: make sure the active team has a membership record (migrates
+        users who joined before multi-team support) and compute read-only status."""
+        try:
+            if self.team_id and not self.store.get_membership(self.team_id):
+                self.store.add_membership(
+                    self.team_id, self.team_name, "", "",
+                    datetime.now().isoformat(timespec="seconds"))
+            self._refresh_team_readonly()
+            self._update_team_status()
+        except Exception:
+            pass
 
     # --------------------------------------------------------------- tabs
     def _build_record_tab(self) -> QWidget:
@@ -1174,6 +1191,10 @@ are stored locally in a protected config file.</p>
         manage.setToolTip("View the team keys you've generated; copy or revoke them.")
         manage.clicked.connect(lambda: TeamKeysDialog(self).exec())
         btns.addWidget(manage)
+        self.teams_btn = QPushButton("Teams…")
+        self.teams_btn.setToolTip("Switch between the teams you've joined; revoked ones are read-only.")
+        self.teams_btn.clicked.connect(lambda: TeamsDialog(self).exec())
+        btns.addWidget(self.teams_btn)
         self.leave_btn = QPushButton("Leave team")
         self.leave_btn.setToolTip("Leave the current team and stop syncing to its shared database.")
         self.leave_btn.clicked.connect(self._leave_team)
@@ -1416,13 +1437,26 @@ are stored locally in a protected config file.</p>
         if getattr(self, "team_status", None) is None:
             return
         in_team = bool(self.team_id)
-        if in_team:
-            self.team_status.setText(f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database.")
+        try:
+            n_teams = len(self.store.list_memberships())
+        except Exception:
+            n_teams = 1 if in_team else 0
+        if in_team and self._team_readonly:
+            self.team_status.setText(
+                f"🔒 In team “{self.team_name or self.team_id}” (read-only) — this key was revoked. "
+                "You can still view the team's meetings; new ones won't sync to its shared database.")
+        elif in_team:
+            extra = f"  ·  {n_teams} team(s) joined — use “Teams…” to switch." if n_teams > 1 else ""
+            self.team_status.setText(
+                f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database." + extra)
         else:
             self.team_status.setText("Not in a team. Generate a key to start one, or paste a key to join.")
         # Leave only makes sense when you're actually in a team.
         if getattr(self, "leave_btn", None) is not None:
             self.leave_btn.setVisible(in_team)
+        # "Teams…" (switch active team) only matters once you've joined more than one.
+        if getattr(self, "teams_btn", None) is not None:
+            self.teams_btn.setVisible(n_teams > 1)
         # The team feed reads from the shared DB — only relevant in a team.
         if getattr(self, "team_feed_check", None) is not None:
             self.team_feed_check.setEnabled(in_team)
@@ -2065,6 +2099,8 @@ are stored locally in a protected config file.</p>
         """Propagate a local deletion to the remote DB(s), when policy allows."""
         if meeting_id is None or self._storage_mode() == "local_only":
             return
+        if self._team_readonly:
+            return  # read-only team — never modify its shared DB (no content loss)
         if self._sync_policy() != "mirror":
             return  # add/update-only: never delete remotely
         cfg = self._current_external_cfg()
@@ -2098,6 +2134,8 @@ are stored locally in a protected config file.</p>
             return
         if self._storage_mode() == "local_only":
             return  # user chose not to sync to a remote database
+        if self._team_readonly:
+            return  # active team's key is revoked — read-only, don't write to it
         cfg = self._current_external_cfg()
         if not (cfg.relational.enabled or cfg.graph.enabled):
             return
@@ -2124,6 +2162,10 @@ are stored locally in a protected config file.</p>
     def _sync_all_external(self) -> None:
         from . import external
 
+        if self._team_readonly:
+            if hasattr(self, "ext_sync_status"):
+                self.ext_sync_status.setText("🔒 This team is read-only (key revoked) — can't write to its shared DB.")
+            return
         cfg = self._current_external_cfg()
         if not (cfg.relational.enabled or cfg.graph.enabled):
             QMessageBox.information(
@@ -2223,6 +2265,11 @@ are stored locally in a protected config file.</p>
             self.store.add_team_key(kid, label, tid, name, key, created)
         except Exception:
             pass
+        # Record a membership so the generator can switch/leave it too, and so it
+        # goes read-only for them if they later revoke this key.
+        if not self.store.get_membership(tid):
+            self.store.add_membership(tid, name, kid, key, created)
+        self._refresh_team_readonly()
         self._update_team_status()
         self._audit("team_key_generated", None, label or kid)
         self._show_key_dialog(key)
@@ -2280,8 +2327,25 @@ are stored locally in a protected config file.</p>
                     return
             except Exception:
                 pass  # can't reach the DB to check — allow, fail later if truly unusable
-        # Apply the shared external DB config into the widgets (guarded), then enable.
-        prev, self._loading = self._loading, True
+        self._apply_external_config(ext)
+        self.team_id, self.team_name = parsed["id"], parsed["team"]
+        self.store.set_setting("team.id", self.team_id)
+        self.store.set_setting("team.name", self.team_name)
+        self.store.add_membership(self.team_id, self.team_name, kid or "", key.strip(),
+                                  datetime.now().isoformat(timespec="seconds"))
+        self._refresh_team_readonly()
+        self._update_team_status()
+        self._audit("team_joined", None, self.team_name)
+        if self._storage_mode() != "local_only" and not self._team_readonly:
+            self._sync_all_external()  # backfill existing meetings to the shared DB
+        QMessageBox.information(
+            self, "Joined team",
+            f"You're now in “{self.team_name}”. Your meetings sync to the shared database automatically.")
+
+    def _apply_external_config(self, ext) -> None:
+        """Apply a team's bundled shared-DB config into the widgets and persist it.
+        Used when joining or switching teams."""
+        prev, self._loading = getattr(self, "_loading", False), True
         try:
             self.ext_rel_enable.setChecked(ext.relational.enabled)
             ki = self.ext_rel_kind.findData(ext.relational.kind or "sql")
@@ -2302,25 +2366,66 @@ are stored locally in a protected config file.</p>
             self._loading = prev
         self._on_rel_kind_changed()
         self._persist_external()
-        self.team_id, self.team_name = parsed["id"], parsed["team"]
+
+    def _switch_team(self, team_id: str) -> None:
+        """Make ``team_id`` the active team: re-apply its shared-DB config and
+        recompute read-only status. Content of every joined team stays isolated
+        and accessible — switching just changes which one you're viewing/writing."""
+        from . import team
+        m = self.store.get_membership(team_id)
+        if not m:
+            return
+        try:
+            parsed = team.parse_team_key(m.get("key") or "")
+            self._apply_external_config(parsed["external"])
+        except Exception:
+            pass  # keep current DB config if the stored key can't be parsed
+        self.team_id, self.team_name = team_id, m.get("team_name") or team_id
         self.store.set_setting("team.id", self.team_id)
         self.store.set_setting("team.name", self.team_name)
+        self._refresh_team_readonly()
         self._update_team_status()
-        self._audit("team_joined", None, self.team_name)
-        if self._storage_mode() != "local_only":
-            self._sync_all_external()  # backfill existing meetings to the shared DB
-        QMessageBox.information(
-            self, "Joined team",
-            f"You're now in “{self.team_name}”. Your meetings sync to the shared database automatically.")
+        self._refresh_meetings()
+
+    def _refresh_team_readonly(self) -> None:
+        """A team goes read-only when the key this user joined with is revoked.
+        Checked locally first, then against the shared DB (best-effort)."""
+        ro = False
+        m = self.store.get_membership(self.team_id) if self.team_id else None
+        kid = (m or {}).get("key_id")
+        if self.team_id and kid:
+            try:
+                if any(k.get("key_id") == kid and k.get("revoked")
+                       for k in self.store.list_team_keys()):
+                    ro = True
+            except Exception:
+                pass
+            if not ro:
+                rel = self._current_external_cfg().relational
+                if rel.enabled and rel.url:
+                    try:
+                        from .external import structured_sink
+                        ro = kid in structured_sink(rel).revoked_key_ids()
+                    except Exception:
+                        ro = False
+        self._team_readonly = ro
 
     def _leave_team(self) -> None:
         if not self.team_id:
             return
         self._audit("team_left", None, self.team_name)
+        self.store.remove_membership(self.team_id)
+        # Switch to another joined team if one remains; otherwise go team-less.
+        remaining = [m for m in self.store.list_memberships()]
+        if remaining:
+            self._switch_team(remaining[0]["team_id"])
+            return
         self.team_id, self.team_name = "", ""
         self.store.set_setting("team.id", "")
         self.store.set_setting("team.name", "")
+        self._team_readonly = False
         self._update_team_status()
+        self._refresh_meetings()
 
     def _show_activity_log(self) -> None:
         ActivityLogDialog(self).exec()
@@ -2405,9 +2510,13 @@ are stored locally in a protected config file.</p>
             from .delivery import McpSink, _mcp_arguments
             McpSink(self._current_delivery_cfg().mcp).send(_mcp_arguments(rec))
         elif dest == "relational":
+            if self._team_readonly:
+                raise RuntimeError("team is read-only (key revoked)")
             from .external import structured_sink
             structured_sink(self._current_external_cfg().relational).upsert(self._extern_rec(rec))
         elif dest == "graph":
+            if self._team_readonly:
+                raise RuntimeError("team is read-only (key revoked)")
             from .external import GraphSink
             g = self._current_external_cfg().graph
             summary = {}
@@ -2510,6 +2619,7 @@ are stored locally in a protected config file.</p>
         }
         name, email, team_id = self._display_name, self.user_email, self.team_id or None
         mode = self._storage_mode()
+        readonly = self._team_readonly  # revoked team: link locally but don't push
 
         def work():
             import json as _json
@@ -2537,7 +2647,7 @@ are stored locally in a protected config file.</p>
             self.store.set_links(meeting_id, links)
             rec["links"] = links
             push_res = {}
-            if mode != "local_only" and (cfg.relational.enabled or cfg.graph.enabled):
+            if mode != "local_only" and not readonly and (cfg.relational.enabled or cfg.graph.enabled):
                 prev = self._gid(self._prev_meeting_id(meeting_id, rec.get("user")))
                 push_res = external.push_meeting(self._extern_rec(rec), cfg, [prev] if prev else None)
                 for k, v in push_res.items():
@@ -3893,6 +4003,10 @@ class TeamKeysDialog(QDialog):
         kid = k.get("key_id")
         self._win.store.set_key_revoked(kid, True)
         self._win._audit("key_revoked", None, k.get("label") or kid)
+        # If this is the key the user is active under, they immediately go
+        # read-only (content stays accessible; no more writes to its shared DB).
+        self._win._refresh_team_readonly()
+        self._win._update_team_status()
         self._reload()
         self.status.setText("Revoked locally; recording in the shared database…")
         rel = self._win._current_external_cfg().relational
@@ -3907,6 +4021,118 @@ class TeamKeysDialog(QDialog):
             return "Revoked locally (no shared database configured to broadcast it)."
 
         self._win._run_async(work, lambda m, ok: self.status.setText(("✓ " if ok else "⚠ ") + m))
+
+
+class TeamsDialog(QDialog):
+    """Switch between the teams you've joined. Each team is an isolated shared
+    scope; a team whose key was revoked is read-only (view-only, no content loss)."""
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._win = main_window
+        self.setWindowTitle("Teams")
+        self.setWindowIcon(app_icon())
+        self.resize(640, 380)
+        v = QVBoxLayout(self)
+        head = QLabel("Teams you've joined")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Switch the active team to view and write to its shared database. Revoked teams "
+                     "stay accessible read-only — switching to one lets you view its meetings, but new "
+                     "ones won't sync there.")
+        sub.setObjectName("HeaderSubtitle")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Team", "Joined", "Status"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.doubleClicked.connect(lambda *_: self._switch())
+        v.addWidget(self.table, 1)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#64748b; font-size:11px;")
+        v.addWidget(self.status)
+
+        row = QHBoxLayout()
+        switch = QPushButton("Switch to selected")
+        switch.setObjectName("primary")
+        switch.clicked.connect(self._switch)
+        row.addWidget(switch)
+        leave = QPushButton("Leave selected")
+        leave.setObjectName("danger")
+        leave.clicked.connect(self._leave)
+        row.addWidget(leave)
+        row.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+        self._reload()
+
+    def _revoked_ids(self) -> set:
+        try:
+            return {k.get("key_id") for k in self._win.store.list_team_keys() if k.get("revoked")}
+        except Exception:
+            return set()
+
+    def _reload(self) -> None:
+        try:
+            self._teams = self._win.store.list_memberships()
+        except Exception:
+            self._teams = []
+        revoked = self._revoked_ids()
+        self.table.setRowCount(len(self._teams))
+        for r, m in enumerate(self._teams):
+            active = m.get("team_id") == self._win.team_id
+            is_ro = (m.get("key_id") in revoked) or (active and self._win._team_readonly)
+            status = "● Active" if active else ""
+            if is_ro:
+                status = (status + " · read-only").strip(" ·") or "read-only (revoked)"
+            cells = [m.get("team_name") or m.get("team_id") or "",
+                     (m.get("joined_at") or "")[:16].replace("T", " "), status]
+            for c, val in enumerate(cells):
+                self.table.setItem(r, c, QTableWidgetItem(str(val)))
+
+    def _selected(self) -> dict | None:
+        r = self.table.currentRow()
+        return self._teams[r] if 0 <= r < len(self._teams) else None
+
+    def _switch(self) -> None:
+        m = self._selected()
+        if not m:
+            self.status.setText("Select a team first.")
+            return
+        self._win._switch_team(m["team_id"])
+        self._reload()
+        self.status.setText(f"Switched to “{m.get('team_name') or m['team_id']}”."
+                            + (" (read-only)" if self._win._team_readonly else ""))
+
+    def _leave(self) -> None:
+        m = self._selected()
+        if not m:
+            self.status.setText("Select a team first.")
+            return
+        if QMessageBox.question(
+            self, "Leave team",
+            f"Leave “{m.get('team_name') or m['team_id']}”? Your local meetings stay; the team's "
+            "shared content is untouched. You can rejoin later with a valid key.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        tid = m["team_id"]
+        if tid == self._win.team_id:
+            self._win._leave_team()  # removes membership + switches/clears active
+        else:
+            self._win.store.remove_membership(tid)
+            self._win._update_team_status()
+        self._reload()
 
 
 class EmailComposeDialog(QDialog):
@@ -4285,8 +4511,11 @@ def run() -> None:
     # Leaving the team on the welcome screen clears the membership.
     left_team = ""
     if dlg.leave_team and current_team:
+        prev_tid = (store.get_setting("team.id") or "").strip()
         store.set_setting("team.id", "")
         store.set_setting("team.name", "")
+        if prev_tid:
+            store.remove_membership(prev_tid)
         left_team = current_team
 
     # Quick join: a team key pasted on the welcome screen applies the shared
@@ -4300,6 +4529,9 @@ def run() -> None:
             external.save_config(store.set_setting, parsed["external"])
             store.set_setting("team.id", parsed["id"])
             store.set_setting("team.name", parsed["team"])
+            from datetime import datetime as _dt
+            store.add_membership(parsed["id"], parsed["team"], parsed.get("key_id") or "",
+                                 dlg.team_key, _dt.now().isoformat(timespec="seconds"))
             joined_team = parsed["team"]
         except Exception:
             pass
