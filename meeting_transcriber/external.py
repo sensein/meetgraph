@@ -563,6 +563,127 @@ class GraphSink:
         else:
             raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
 
+    def _select(self, query: str) -> list[dict]:
+        """Run a SPARQL SELECT and return the result bindings."""
+        if not self.cfg.query_url:
+            raise RuntimeError("This graph database has no SPARQL query endpoint configured.")
+        q = urllib.parse.urlencode({"query": query})
+        url = f"{self.cfg.query_url}{'&' if '?' in self.cfg.query_url else '?'}{q}"
+        headers = {**self._auth_header(), "Accept": "application/sparql-results+json"}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("results", {}).get("bindings", [])
+
+    _PREFIXES = (
+        "PREFIX mco: <https://tekrajchhetri.com/mco/> "
+        "PREFIX dcterms: <http://purl.org/dc/terms/> "
+        "PREFIX prov: <http://www.w3.org/ns/prov#> "
+        "PREFIX schema: <http://schema.org/> "
+        "PREFIX foaf: <http://xmlns.com/foaf/0.1/> "
+        "PREFIX skos: <http://www.w3.org/2004/02/skos/core#> "
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
+    )
+
+    def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        """List the team's meetings from the shared graph (newest first).
+
+        Returns the same row shape as the relational sink so the UI can render
+        either source. ``summary_md`` is a marker ('✦' when the meeting has notes)
+        — the full notes are reconstructed on demand by :meth:`get_meeting`."""
+        ng = self.named_graph
+        team_filter = f"?m schema:isPartOf <{kg.team_iri(team_id)}> . " if team_id else ""
+        query = (
+            self._PREFIXES +
+            "SELECT ?m ?title ?start ?date (COUNT(DISTINCT ?t) AS ?ntopics) "
+            '(GROUP_CONCAT(DISTINCT ?pname; separator=", ") AS ?people) WHERE { '
+            f"GRAPH <{ng}> {{ ?m a mco:Meeting . {team_filter}"
+            "OPTIONAL { ?m dcterms:title ?title } "
+            "OPTIONAL { ?m prov:startedAtTime ?start } "
+            "OPTIONAL { ?m dcterms:date ?date } "
+            "OPTIONAL { ?m mco:has_topic ?t } "
+            "OPTIONAL { ?m prov:wasAssociatedWith ?a . ?a foaf:name ?pname } } } "
+            f"GROUP BY ?m ?title ?start ?date ORDER BY DESC(?start) LIMIT {int(limit)}"
+        )
+        rows: list[dict] = []
+        prefix = kg.BASE + "meeting/"
+        for b in self._select(query):
+            m = b.get("m", {}).get("value", "")
+            if not m.startswith(prefix):
+                continue
+            tail = m[len(prefix):]
+            rid = int(tail) if tail.isdigit() else tail
+            start = b.get("start", {}).get("value", "") or b.get("date", {}).get("value", "")
+            ntopics = b.get("ntopics", {}).get("value", "0")
+            rows.append({
+                "id": rid,
+                "title": b.get("title", {}).get("value", "") or "Meeting",
+                "user": b.get("people", {}).get("value", ""),
+                "started_at": start, "created_at": start,
+                "summary_md": "✦" if ntopics not in ("0", "", None) else "",
+            })
+        return rows
+
+    def get_meeting(self, meeting_id) -> dict | None:
+        """Reconstruct a read-only meeting record (notes as Markdown) from the
+        shared graph. Transcripts aren't stored in RDF, so only notes come back."""
+        ng = self.named_graph
+        m_iri = kg.meeting_iri(meeting_id)
+        query = (
+            self._PREFIXES +
+            "SELECT ?title ?start "
+            '(GROUP_CONCAT(DISTINCT ?topic; separator="||") AS ?topics) '
+            '(GROUP_CONCAT(DISTINCT ?dec; separator="||") AS ?decisions) '
+            '(GROUP_CONCAT(DISTINCT ?q; separator="||") AS ?questions) '
+            '(GROUP_CONCAT(DISTINCT ?act; separator="||") AS ?actions) '
+            '(GROUP_CONCAT(DISTINCT ?term; separator="||") AS ?terms) '
+            '(GROUP_CONCAT(DISTINCT ?pname; separator="||") AS ?people) WHERE { '
+            f"GRAPH <{ng}> {{ BIND(<{m_iri}> AS ?m) ?m a mco:Meeting . "
+            "OPTIONAL { ?m dcterms:title ?title } "
+            "OPTIONAL { ?m prov:startedAtTime ?start } "
+            "OPTIONAL { ?m mco:has_topic ?t . ?t skos:prefLabel ?topic } "
+            "OPTIONAL { ?m mco:has_decision ?d . ?d rdfs:label ?dec } "
+            "OPTIONAL { ?m mco:has_open_question ?oq . ?oq rdfs:label ?q } "
+            "OPTIONAL { ?m mco:has_action_item ?ai . ?ai rdfs:label ?act } "
+            "OPTIONAL { ?m mco:has_key_term ?k . ?k skos:prefLabel ?term } "
+            "OPTIONAL { ?m prov:wasAssociatedWith ?ag . ?ag foaf:name ?pname } } } "
+            "GROUP BY ?title ?start"
+        )
+        bindings = self._select(query)
+        if not bindings:
+            return None
+        b = bindings[0]
+
+        def parts(key: str) -> list[str]:
+            return [s for s in (b.get(key, {}).get("value", "") or "").split("||") if s]
+
+        title = b.get("title", {}).get("value", "") or f"Meeting {meeting_id}"
+        md = [f"# {title}", ""]
+        people = parts("people")
+        if people:
+            md += [f"*Participants: {', '.join(people)}*", ""]
+        sections = [
+            ("Key points by topic", parts("topics")),
+            ("Decisions", parts("decisions")),
+            ("Open questions", parts("questions")),
+            ("Action items", parts("actions")),
+            ("Key terms", parts("terms")),
+        ]
+        for heading, items in sections:
+            if items:
+                md.append(f"## {heading}")
+                md += [f"- {it}" for it in items]
+                md.append("")
+        if len(md) <= 2:
+            md.append("_No notes found for this meeting in the shared graph._")
+        return {
+            "id": meeting_id, "title": title,
+            "user": ", ".join(people),
+            "started_at": b.get("start", {}).get("value", ""),
+            "summary_md": "\n".join(md).strip() + "\n",
+            "transcript_md": "_Transcript isn't stored in the graph database._",
+        }
+
     def fetch_digests(self) -> list[dict]:
         """Query the shared graph for every meeting's id/title/topics/entities.
 

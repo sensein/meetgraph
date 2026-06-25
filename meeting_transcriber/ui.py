@@ -549,15 +549,28 @@ class MainWindow(QWidget):
         return "✓ done"
 
     def _fetch_team_meetings(self, query: str):
-        """Return (rows, note). rows=None means the shared DB isn't available."""
-        cfg = self._current_external_cfg().relational
-        if not (cfg.enabled and cfg.url):
-            return None, "Enable a relational shared database in Configuration to see team meetings."
-        try:
-            from .external import structured_sink
-            rows = structured_sink(cfg).list_meetings(team_id=self.team_id or None)
-        except Exception as exc:
-            return None, f"⚠ Shared DB: {exc}"
+        """Return (rows, note). rows=None means the shared DB isn't available.
+
+        Prefers the relational shared DB (richest). If only a graph database is
+        configured for the team, read the meeting list from it over SPARQL."""
+        ext = self._current_external_cfg()
+        rel = ext.relational
+        from .external import GraphSink, structured_sink
+        if rel.enabled and rel.url:
+            self._team_feed_source = "relational"
+            try:
+                rows = structured_sink(rel).list_meetings(team_id=self.team_id or None)
+            except Exception as exc:
+                return None, f"⚠ Shared DB: {exc}"
+        elif ext.graph.enabled and ext.graph.query_url:
+            self._team_feed_source = "graph"
+            try:
+                rows = GraphSink(ext.graph).list_meetings(team_id=self.team_id or None)
+            except Exception as exc:
+                return None, f"⚠ Shared graph DB: {exc}"
+        else:
+            return None, ("Enable a relational or graph shared database (with a query endpoint) "
+                          "in Configuration to see team meetings.")
         if query:
             rows = [r for r in rows if query in (r.get("title") or "").lower()
                     or query in (r.get("summary_md") or "").lower()]
@@ -569,15 +582,20 @@ class MainWindow(QWidget):
         if mid is None:
             return
         if getattr(self, "_team_feed", False):
-            cfg = self._current_external_cfg().relational
+            ext = self._current_external_cfg()
             try:
-                from .external import structured_sink
-                rec = structured_sink(cfg).get_meeting(mid)
+                from .external import GraphSink, structured_sink
+                if getattr(self, "_team_feed_source", "relational") == "graph":
+                    rec = GraphSink(ext.graph).get_meeting(mid)
+                else:
+                    rec = structured_sink(ext.relational).get_meeting(mid)
             except Exception as exc:
                 QMessageBox.warning(self, "Shared DB", f"Could not load meeting: {exc}")
                 return
             if rec:
                 MeetingDetailDialog(self, rec, remote=True).exec()
+            else:
+                QMessageBox.information(self, "Shared DB", "Could not load this meeting.")
             return
         rec = self.store.get_meeting(mid)
         if not rec:
