@@ -354,6 +354,10 @@ class Store:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def rename_meeting(self, meeting_id: int, title: str) -> None:
+        with self._connect() as con:
+            con.execute("UPDATE meetings SET title = ? WHERE id = ?", (title, meeting_id))
+
     def update_summary(self, meeting_id: int, summary_md: str, summary_json: str) -> None:
         with self._connect() as con:
             con.execute(

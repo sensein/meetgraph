@@ -518,9 +518,16 @@ class MainWindow(QWidget):
             jobs = self.store.jobs_for(meeting_id)
         except Exception:
             return ""
-        if any(v == "pending" for v in jobs.values()) or any(
-                mid == meeting_id for mid, _ in self._processing):
-            return "⏳ processing"
+        in_flight = any(mid == meeting_id for mid, _ in self._processing)
+        if any(v == "pending" for v in jobs.values()) or in_flight:
+            stages = {s for s, v in jobs.items() if v == "pending"}
+            if "literature" in stages:
+                return "⏳ literature…"
+            if "summary" in stages:
+                return "⏳ summarizing…"
+            return "⏳ processing…"
+        if not jobs:
+            return ""  # not tracked (e.g. an older meeting) — don't claim "done"
         return "✓ done"
 
     def _fetch_team_meetings(self, query: str):
@@ -2486,6 +2493,7 @@ class MainWindow(QWidget):
             # When this is the final (post-Stop) summary, record it and let the
             # agent link this meeting to related ones. (Skipped on live ticks.)
             if not self.controller.running:
+                self.store.mark_job(self._meeting_id, "summary", "done")
                 self._audit("summary_generated", self._meeting_id)
                 self._process_meeting(self._meeting_id)  # crosslink + literature (status-tracked)
 
@@ -2642,6 +2650,12 @@ class MainWindow(QWidget):
                 transcript_plain=self.transcript.to_plain(),
                 team_id=self.team_id or None,
             )
+            # Mark enrichment as pending up front so the Summary tab shows the
+            # meeting as processing from the moment recording stops.
+            if self.auto_notes.isChecked():
+                self.store.mark_job(self._meeting_id, "summary", "pending")
+                for stage in self._target_stages():
+                    self.store.mark_job(self._meeting_id, stage, "pending")
             self.status_label.setText(f"Saved transcript to local database (#{self._meeting_id}).")
             self._refresh_meetings()
             self._audit("meeting_saved", self._meeting_id, self.meeting_name or default_title)
@@ -2975,9 +2989,9 @@ class MeetingDetailDialog(QDialog):
         v.setContentsMargins(18, 16, 18, 16)
         v.setSpacing(10)
 
-        head = QLabel(title)
-        head.setObjectName("HeaderTitle")
-        v.addWidget(head)
+        self._head = QLabel(title)
+        self._head.setObjectName("HeaderTitle")
+        v.addWidget(self._head)
         when = (rec.get("started_at") or rec.get("created_at") or "")[:16].replace("T", " ")
         sub = QLabel(f"{when}   ·   {rec.get('user') or ''}")
         sub.setObjectName("HeaderSubtitle")
@@ -3004,6 +3018,10 @@ class MeetingDetailDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(8)
+        rename = QPushButton("Rename…")
+        rename.setToolTip("Rename this meeting")
+        rename.clicked.connect(self._rename)
+        row.addWidget(rename)
         copy = QPushButton("Copy")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self._current_md()))
         row.addWidget(copy)
@@ -3140,6 +3158,31 @@ class MeetingDetailDialog(QDialog):
         path = self._export()
         if path:
             reveal_in_file_manager(path)
+
+    def _rename(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        new, ok = QInputDialog.getText(self, "Rename meeting", "Meeting name:",
+                                       text=self._rec.get("title") or "")
+        new = new.strip()
+        if not ok or not new or new == (self._rec.get("title") or ""):
+            return
+        self._rec["title"] = new
+        self.setWindowTitle(f"MeetGraph — {new}" + ("  (shared)" if self._remote else ""))
+        self._head.setText(new)
+        try:
+            if self._remote:  # update the shared DB record directly
+                from .external import structured_sink
+                rel = self._parent._current_external_cfg().relational
+                if rel.enabled and rel.url:
+                    structured_sink(rel).upsert(self._rec)
+            else:
+                self._parent.store.rename_meeting(self._mid, new)
+                self._parent._audit("meeting_renamed", self._mid, new)
+                self._parent._push_external_async(self._mid)  # re-sync the new title
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename", f"Renamed locally, but sync failed: {exc}")
+        self._parent._refresh_meetings()
 
     def _email(self) -> None:
         md = self._current_md()
