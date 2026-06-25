@@ -73,6 +73,11 @@ class Publication(BaseModel):
     points: list[str] = Field(default_factory=list, description="A few key points from the paper.")
 
 
+class Provenance(BaseModel):
+    transcription: str | None = None  # engine + model that produced the transcript
+    notes: str | None = None          # provider + model that generated the notes
+
+
 class MeetingSummary(BaseModel):
     meeting: MeetingInfo
     topics: list[Topic] = Field(default_factory=list)
@@ -86,6 +91,8 @@ class MeetingSummary(BaseModel):
     # Filled by link_literature() for scientific discussions — not by the main pass.
     publications: list[Publication] = Field(default_factory=list)
     research_gaps: list[str] = Field(default_factory=list)
+    # Model provenance (which engine/model produced transcript + notes), set by the app.
+    provenance: Provenance | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -508,6 +515,14 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
 
     if summary.research_gaps:
         lines += ["## Research gaps", ""] + [f"- {g}" for g in summary.research_gaps] + [""]
+
+    if summary.provenance and (summary.provenance.transcription or summary.provenance.notes):
+        bits = []
+        if summary.provenance.transcription:
+            bits.append(f"Transcribed with {summary.provenance.transcription}")
+        if summary.provenance.notes:
+            bits.append(f"Notes by {summary.provenance.notes}")
+        lines += ["---", "", f"_{' · '.join(bits)}_", ""]
 
     return "\n".join(lines).rstrip() + "\n"
 

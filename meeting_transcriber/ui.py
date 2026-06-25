@@ -262,6 +262,7 @@ class MainWindow(QWidget):
         self._wire_config_persistence()
         self._loading = False
         self._update_proc_status()
+        self._update_using_labels()
         QTimer.singleShot(1500, self._resume_pending)  # finish any interrupted enrichment
 
     # ---------------------------------------------------------------- UI build
@@ -292,6 +293,11 @@ class MainWindow(QWidget):
         v = QVBoxLayout(page)
         v.setContentsMargins(2, 10, 2, 2)
         v.setSpacing(10)
+
+        self.models_banner = QLabel("")
+        self.models_banner.setWordWrap(True)
+        self.models_banner.setText("")
+        v.addWidget(self.models_banner)
 
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
@@ -663,7 +669,7 @@ class MainWindow(QWidget):
         row.addWidget(QLabel("Engine:"))
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("Local — Whisper (faster-whisper / Apple MLX)", "local")
-        self.engine_combo.addItem("OpenAI (Whisper / GPT-4o transcribe)", "openai")
+        self.engine_combo.addItem("OpenAI API", "openai")
         self.engine_combo.addItem("OpenAI-compatible — Groq, local server, custom…", "compatible")
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         row.addWidget(self.engine_combo)
@@ -785,6 +791,10 @@ class MainWindow(QWidget):
         self.engine_test_status.setStyleSheet("color:#64748b; font-size:11px;")
         test_row.addWidget(self.engine_test_status, 1)
         engine_layout.addLayout(test_row)
+
+        self.engine_using_label = QLabel("")
+        self.engine_using_label.setStyleSheet("color:#334155; font-size:11px; font-weight:600;")
+        engine_layout.addWidget(self.engine_using_label)
 
         self._update_compute_label()
         return engine_box
@@ -1417,6 +1427,10 @@ class MainWindow(QWidget):
         row2.addWidget(self.ai_base, 1)
         outer.addLayout(row2)
 
+        self.notes_using_label = QLabel("")
+        self.notes_using_label.setStyleSheet("color:#334155; font-size:11px; font-weight:600;")
+        outer.addWidget(self.notes_using_label)
+
         row3 = QHBoxLayout()
         self.auto_notes = QCheckBox("Auto-generate notes when I Stop")
         self.auto_notes.setChecked(True)
@@ -1542,6 +1556,13 @@ class MainWindow(QWidget):
         self.hf_token_edit.textChanged.connect(self._persist_config)
         self.compute_combo.currentIndexChanged.connect(self._persist_config)
         self._wire_external_persistence()
+        # Keep the read-only "which model is used" lines in sync.
+        for w in (self.engine_combo, self.compute_combo, self.ai_provider):
+            w.currentIndexChanged.connect(self._update_using_labels)
+        for w in (self.model_combo, self.openai_model_combo, self.compat_model, self.ai_model):
+            w.currentTextChanged.connect(self._update_using_labels)
+        for w in (self.compat_base, self.api_key_edit, self.compat_key, self.ai_key):
+            w.textChanged.connect(self._update_using_labels)
 
     def _apply_hf_token(self) -> None:
         token = self.hf_token_edit.text().strip()
@@ -2545,6 +2566,10 @@ class MainWindow(QWidget):
             self._running_summary = chunk
         self._summarized_chars = max(getattr(self, "_summarized_chars", 0), dispatch_len)
 
+        from .agent import Provenance
+        self._running_summary.provenance = Provenance(
+            transcription=getattr(self, "_transcribe_label", None), notes=self._notes_label())
+
         markdown = summary_to_markdown(self._running_summary, title=self.meeting_name or None)
         json_text = self._running_summary.model_dump_json(indent=2)
         self._last_summary_md = markdown
@@ -2609,6 +2634,73 @@ class MainWindow(QWidget):
 
     def _on_engine_changed(self) -> None:
         self.engine_stack.setCurrentIndex(self.engine_combo.currentIndex())
+
+    def _transcription_label(self, cfg: dict) -> str:
+        """Human-readable provenance for which engine/model produced the transcript."""
+        from .transcribe import compute_label
+
+        eng = cfg.get("engine")
+        if eng == "local":
+            return f"Whisper {cfg.get('model_size')} · {compute_label(cfg.get('device', 'auto'))} (local)"
+        if eng == "openai":
+            return f"OpenAI {cfg.get('openai_model')}"
+        if eng == "compatible":
+            return f"{cfg.get('openai_model')} @ {cfg.get('base_url')}"
+        return str(eng)
+
+    def _update_using_labels(self) -> None:
+        """Read-only lines showing exactly which provider+model is used for each."""
+        if hasattr(self, "engine_using_label"):
+            try:
+                self.engine_using_label.setText(
+                    "▸ Transcribing with: " + self._transcription_label(self._transcription_config()))
+            except Exception:
+                pass
+        if hasattr(self, "notes_using_label"):
+            try:
+                self.notes_using_label.setText("▸ Notes written by: " + self._notes_label())
+            except Exception:
+                pass
+        self._update_models_banner()
+
+    def _update_models_banner(self) -> None:
+        """Top-of-Meeting banner: which models are used (open-source vs cloud) + key status."""
+        if not hasattr(self, "models_banner"):
+            return
+        try:
+            eng = self.engine_combo.currentData()
+            t_label = self._transcription_label(self._transcription_config())
+            if eng == "local":
+                t = f"{t_label} · local / open-source"
+            elif eng == "openai":
+                t = f"{t_label} · cloud · " + ("✓ key set" if self.api_key_edit.text().strip() else "⚠ API key required")
+            else:
+                t = f"{t_label} · custom · " + ("✓ key set" if self.compat_key.text().strip() else "no key (ok for local)")
+
+            prov = self.ai_provider.currentData()
+            n_label = self._notes_label()
+            if prov == "opensource":
+                n = f"{n_label} · open-source / local"
+            else:
+                n = f"{n_label} · cloud · " + ("✓ key set" if self.ai_key.text().strip() else "⚠ API key required")
+
+            ok = "⚠" not in (t + n)
+            self.models_banner.setText(f"🎙 Transcription: {t}    🧠 Notes: {n}")
+            color = "#0d9488" if ok else "#b45309"
+            bg = "#ecfdf5" if ok else "#fffbeb"
+            border = "#a7f3d0" if ok else "#fcd34d"
+            self.models_banner.setStyleSheet(
+                f"color:{color}; background:{bg}; border:1px solid {border}; "
+                "border-radius:8px; padding:6px 10px; font-size:11px; font-weight:600;")
+        except Exception:
+            pass
+
+    def _notes_label(self) -> str:
+        from .agent import PROVIDER_LABELS
+
+        provider = self.ai_provider.currentData()
+        model = self.ai_model.currentText().strip()
+        return f"{PROVIDER_LABELS.get(provider, provider)} · {model}" if model else PROVIDER_LABELS.get(provider, provider)
 
     def _transcription_config(self) -> dict:
         """Build the transcription engine config from the current widgets."""
@@ -2707,6 +2799,7 @@ class MainWindow(QWidget):
             return
 
         config = self._transcription_config()
+        self._transcribe_label = self._transcription_label(config)
         engine = config["engine"]
         if engine == "compatible" and not config.get("base_url"):
             QMessageBox.warning(self, "Missing URL", "Enter the OpenAI-compatible base URL.")

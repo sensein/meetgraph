@@ -50,6 +50,7 @@ PROV_ENDED = NamedNode("http://www.w3.org/ns/prov#endedAtTime")
 PROV_GENERATED = NamedNode("http://www.w3.org/ns/prov#generatedAtTime")
 DCT_DATE = NamedNode("http://purl.org/dc/terms/date")
 PROV_ASSOCIATED = NamedNode("http://www.w3.org/ns/prov#wasAssociatedWith")
+PROV_SOFTWAREAGENT = NamedNode("http://www.w3.org/ns/prov#SoftwareAgent")
 PROV_ATTRIBUTED = NamedNode("http://www.w3.org/ns/prov#wasAttributedTo")
 PROV_INFORMEDBY = NamedNode("http://www.w3.org/ns/prov#wasInformedBy")
 SCHEMA_ISPARTOF = NamedNode("http://schema.org/isPartOf")
@@ -294,6 +295,15 @@ def quads_for_meeting(
     for gap in summary.get("research_gaps") or []:
         if gap:
             yield q(m, P_RESEARCH_GAP, Literal(gap))
+
+    # Model provenance — which software produced the transcript / notes (PROV)
+    prov = summary.get("provenance") or {}
+    for kind, label in (("transcriber", prov.get("transcription")), ("notes", prov.get("notes"))):
+        if label:
+            agent = NamedNode(f"{meeting_iri(mid)}/software/{kind}")
+            yield q(agent, RDF_TYPE, PROV_SOFTWAREAGENT)
+            yield q(agent, RDFS_LABEL, Literal(label))
+            yield q(m, PROV_ASSOCIATED, agent)
 
     # Team membership (centralized, shared knowledge graph)
     team_id = rec.get("team_id")
