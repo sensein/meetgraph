@@ -287,6 +287,9 @@ def quads_for_meeting(
         cite = " ".join(x for x in [pub.get("authors"), pub.get("journal"), pub.get("year")] if x)
         if cite:
             yield q(node, DCT_BIBLIO, Literal(cite))
+        for pt in pub.get("points") or []:
+            if pt:
+                yield q(node, P_POINT, Literal(pt))
         yield q(m, DCT_REFERENCES, node)
     for gap in summary.get("research_gaps") or []:
         if gap:

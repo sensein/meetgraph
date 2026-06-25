@@ -70,6 +70,7 @@ class Publication(BaseModel):
     doi: str | None = None
     url: str | None = None
     relevance: str | None = Field(None, description="Why this paper is relevant to the discussion.")
+    points: list[str] = Field(default_factory=list, description="A few key points from the paper.")
 
 
 class MeetingSummary(BaseModel):
@@ -328,6 +329,7 @@ def link_literature(
         return summary
 
     pubs = [Publication(**a.to_dict()) for a in articles]
+    abstracts = pubmed.fetch_abstracts([a.pmid for a in articles], api_key=api_key)
 
     if provider_cfg and provider_cfg.get("provider"):
         try:
@@ -337,6 +339,9 @@ def link_literature(
             class _Rel(BaseModel):
                 pmid: str
                 relevance: str = Field(description="one short sentence on why it's relevant")
+                points: list[str] = Field(
+                    default_factory=list,
+                    description="2-3 short key points from the paper (findings/method); keep it brief")
 
             class _Sci(BaseModel):
                 is_scientific: bool = Field(description="Is this a scientific/research discussion?")
@@ -351,22 +356,28 @@ def link_literature(
             agent = Agent(model, output_type=output_type, retries=2, system_prompt=(
                 "You connect a meeting to the scientific literature. Decide if the discussion is "
                 "scientific/research-oriented. If so, select the genuinely relevant papers from the "
-                "candidates (by pmid) with a one-line reason, and list concrete research gaps or open "
-                "questions the discussion raises relative to that literature. If it is not scientific, "
-                "set is_scientific=false and return empty lists. Use only the given candidate pmids."))
+                "candidates (by pmid), give a one-line reason, and 2-3 short key points from each "
+                "paper's abstract (findings or method — concise, not a deep review). Also list concrete "
+                "research gaps the discussion raises relative to the literature. If it is not "
+                "scientific, set is_scientific=false and return empty lists. Use only the given pmids."))
             topics = "; ".join(f"{t.topic}: {', '.join(t.points[:3])}" for t in summary.topics[:8])
-            cand = "\n".join(f"pmid={a.pmid} | {a.title} ({a.journal} {a.year})" for a in articles)
+            cand = "\n\n".join(
+                f"pmid={a.pmid} | {a.title} ({a.journal} {a.year})"
+                + (f"\nAbstract: {abstracts[a.pmid][:600]}" if abstracts.get(a.pmid) else "")
+                for a in articles)
             result = agent.run_sync(
                 f"Discussion topics:\n{topics}\n\nKey terms: {', '.join(terms)}\n\n"
                 f"Candidate papers:\n{cand}\n\nReturn the assessment.")
             sci = result.output
             if not sci.is_scientific:
                 return summary  # not a scientific meeting -> no literature section
-            reasons = {r.pmid: r.relevance for r in sci.relevant}
-            if reasons:
-                pubs = [p for p in pubs if p.pmid in reasons]
+            rels = {r.pmid: r for r in sci.relevant}
+            if rels:
+                pubs = [p for p in pubs if p.pmid in rels]
                 for p in pubs:
-                    p.relevance = reasons.get(p.pmid)
+                    r = rels.get(p.pmid)
+                    p.relevance = r.relevance if r else None
+                    p.points = list(r.points) if r else []
             summary.research_gaps = list(sci.gaps)
         except Exception:
             pass  # keep the unfiltered top results
@@ -432,6 +443,7 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
             if p.authors:
                 line += f". {p.authors}"
             lines.append(line + tail)
+            lines += [f"  - {pt}" for pt in p.points]
         lines.append("")
 
     if summary.research_gaps:

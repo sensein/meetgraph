@@ -62,6 +62,36 @@ def _doi(doc: dict) -> str | None:
     return el.replace("doi:", "").strip() if el.lower().startswith("doi:") else None
 
 
+def fetch_abstracts(pmids: list[str], api_key: str | None = None) -> dict[str, str]:
+    """Return {pmid: abstract text} for the given PMIDs (best-effort, may be empty)."""
+    import xml.etree.ElementTree as ET
+
+    pmids = [p for p in pmids if p]
+    if not pmids:
+        return {}
+    params = {"db": "pubmed", "id": ",".join(pmids), "rettype": "abstract",
+              "retmode": "xml", "tool": "meetgraph"}
+    if api_key:
+        params["api_key"] = api_key
+    url = f"{_EUTILS}/efetch.fcgi?{urllib.parse.urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            root = ET.fromstring(resp.read())
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for art in root.iter("PubmedArticle"):
+        pmid_el = art.find(".//MedlineCitation/PMID")
+        if pmid_el is None or not pmid_el.text:
+            continue
+        texts = [(e.text or "").strip() for e in art.iter("AbstractText")]
+        abstract = " ".join(t for t in texts if t)
+        if abstract:
+            out[pmid_el.text] = abstract
+    return out
+
+
 def search(query: str, api_key: str | None = None, retmax: int = 8) -> list[Article]:
     """Search PubMed and return up to ``retmax`` articles, ranked by relevance."""
     if not query.strip():
