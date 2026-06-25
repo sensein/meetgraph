@@ -3242,7 +3242,9 @@ class MeetingDetailDialog(QDialog):
 
         self._view = QTextBrowser()
         self._view.setObjectName("transcript")
-        self._view.setOpenExternalLinks(True)  # clickable Wikipedia/Wikidata links
+        self._view.setOpenLinks(False)          # handle clicks ourselves
+        self._view.setOpenExternalLinks(False)
+        self._view.anchorClicked.connect(self._on_anchor)
         self._view.setFont(QFont("SF Pro Text", 13))
         v.addWidget(self._view, 1)
         # Raw-markdown editor (hidden until "Edit"): lets the user refine/add info.
@@ -3307,6 +3309,25 @@ class MeetingDetailDialog(QDialog):
         close.clicked.connect(self.accept)
         row.addWidget(close)
         v.addLayout(row)
+
+    def _on_anchor(self, url) -> None:
+        """Open a related meeting (meetgraph: links) or an external link (Wikipedia, etc.)."""
+        from PyQt6.QtGui import QDesktopServices
+
+        s = url.toString()
+        if s.startswith("meetgraph:"):
+            try:
+                mid = int(s.rstrip("/").split("/")[-1])
+            except ValueError:
+                return
+            rec = self._parent.store.get_meeting(mid)
+            if rec:
+                MeetingDetailDialog(self._parent, rec).exec()
+            else:
+                QMessageBox.information(self, "Not found",
+                                        "That meeting isn't in this local database (it may be a teammate's).")
+        else:
+            QDesktopServices.openUrl(url)
 
     def _scope(self) -> str:
         return self.scope_combo.currentData()
@@ -3391,13 +3412,14 @@ class MeetingDetailDialog(QDialog):
             return ""
         if not links:
             return ""
-        lines = ["## Related meetings", "", "_Linked automatically by the cross-link agent._", ""]
+        lines = ["## Related meetings", "",
+                 "_Linked automatically by the cross-link agent — click one to open it._", ""]
         for l in links:
             rec = parent.store.get_meeting(l["related_id"])
             title = (rec.get("title") if rec else None) or f"Meeting #{l['related_id']}"
             rel = (l.get("relation") or "related").replace("_", " ")
             reason = f" — {l['reason']}" if l.get("reason") else ""
-            lines.append(f"- **{title}** ({rel}){reason}")
+            lines.append(f"- **[{title}](meetgraph:meeting/{l['related_id']})** ({rel}){reason}")
         return "\n".join(lines)
 
     def _current_md(self) -> str:
