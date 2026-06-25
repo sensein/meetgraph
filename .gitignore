@@ -17,7 +17,6 @@ venv/
 
 # Local app data / secrets
 *.db
-globus_tokens.json
 
 # Exported meeting artifacts
 meeting-*.md

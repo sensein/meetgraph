@@ -16,6 +16,4 @@ openai>=1.30
 # Claude / OpenAI / OpenRouter / open-source OpenAI-compatible servers)
 pydantic-ai-slim[anthropic,openai]>=2.0
 
-# Globus Auth sign-in (OAuth2 Native App flow)
-globus-sdk>=3
 # Local storage uses the stdlib `sqlite3` — no extra dependency.

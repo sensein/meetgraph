@@ -201,7 +201,7 @@ QDialog { background: #eef1f6; }
 
 
 class MainWindow(QWidget):
-    def __init__(self, identity=None) -> None:
+    def __init__(self, user_name: str = "", meeting_name: str = "") -> None:
         super().__init__()
         self.setWindowTitle("MeetGraph")
         self.setObjectName("Root")
@@ -215,9 +215,10 @@ class MainWindow(QWidget):
         self.controller = TranscriptionController()
         self.devices = list_input_devices()
         self.store = Store()
-        self.identity = identity
-        self.user = (identity.username or identity.sub) if identity else "local"
-        self.speaker_self = identity.display if identity else "You"
+        self.user = user_name.strip() or "local"
+        self.speaker_self = user_name.strip() or "You"
+        self._display_name = user_name.strip() or "Local"
+        self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
         self._last_summary_md = ""
@@ -496,10 +497,7 @@ class MainWindow(QWidget):
             )
 
     def _update_identity_label(self) -> None:
-        if self.identity:
-            self.identity_label.setText(f"👤 {self.identity.display}")
-        else:
-            self.identity_label.setText("👤 Local (not signed in)")
+        self.identity_label.setText(f"👤 {self._display_name}")
 
     def _build_ai_section(self) -> QGroupBox:
         from .agent import PROVIDERS, PROVIDER_LABELS
@@ -628,7 +626,7 @@ class MainWindow(QWidget):
         }
         self.summary_btn.setEnabled(False)
         self._set_summary_status("Generating summary…")
-        worker = NotesWorker(config, self.transcript.to_plain(), title=None)
+        worker = NotesWorker(config, self.transcript.to_plain(), title=self.meeting_name or None)
         worker.done.connect(self._on_notes_done)
         worker.failed.connect(self._on_notes_failed)
         self._notes_worker = worker  # keep a reference
@@ -774,9 +772,10 @@ class MainWindow(QWidget):
         if not self.transcript.entries:
             return
         try:
+            default_title = f"Meeting {self._started_at:%Y-%m-%d %H:%M}" if self._started_at else "Meeting"
             self._meeting_id = self.store.save_meeting(
                 user=self.user,
-                title=f"Meeting {self._started_at:%Y-%m-%d %H:%M}" if self._started_at else "Meeting",
+                title=self.meeting_name or default_title,
                 started_at=self._started_at.isoformat() if self._started_at else "",
                 ended_at=datetime.now().isoformat(timespec="seconds"),
                 transcript_md=self.transcript.to_markdown(),
@@ -985,118 +984,68 @@ def _escape(text: str) -> str:
     )
 
 
-class GlobusLoginDialog(QDialog):
-    """Globus Auth (Native App OAuth2) sign-in shown at startup."""
+class WelcomeDialog(QDialog):
+    """First-run setup: capture the user's name and an optional meeting name.
 
-    def __init__(self):
+    The name is shown only the first time — once saved it's reused silently.
+    """
+
+    def __init__(self, default_name: str = "", ask_name: bool = True):
         super().__init__()
-        self.setWindowTitle("Sign in — MeetGraph")
+        self.setWindowTitle("MeetGraph")
         self.setWindowIcon(app_icon())
-        self.resize(520, 360)
-        self.identity = None
-        self._auth = None
+        self.resize(460, 420)
+        self.user_name = default_name
+        self.meeting_name = ""
+        self._ask_name = ask_name
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(22, 20, 22, 20)
+        v.setContentsMargins(26, 22, 26, 22)
         v.setSpacing(12)
 
         if LOGO_PATH.exists():
             logo = QLabel()
             logo.setPixmap(
                 QPixmap(str(LOGO_PATH)).scaled(
-                    QSize(200, 200), Qt.AspectRatioMode.KeepAspectRatio,
+                    QSize(180, 180), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
             logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(logo)
 
-        title = QLabel("Turning meetings into a knowledge graph")
-        title.setObjectName("HeaderSubtitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        v.addWidget(title)
+        tagline = QLabel("Turning meetings into a knowledge graph")
+        tagline.setObjectName("HeaderSubtitle")
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(tagline)
+        v.addSpacing(6)
 
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Your name:"))
-        self.name_edit = QLineEdit(os.environ.get("MEETGRAPH_USER", ""))
-        self.name_edit.setPlaceholderText("used to label your speech (e.g. Tek Raj)")
-        name_row.addWidget(self.name_edit, 1)
-        v.addLayout(name_row)
+        self.name_edit = QLineEdit(default_name)
+        if ask_name:
+            lbl = QLabel("Your name")
+            lbl.setStyleSheet("font-weight:600;")
+            v.addWidget(lbl)
+            self.name_edit.setPlaceholderText("used to label your speech (e.g. Tek Raj)")
+            v.addWidget(self.name_edit)
 
-        sep = QLabel("Optionally sign in with Globus, or just continue with your name:")
-        sep.setStyleSheet("color:#64748b; font-size:12px;")
-        sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        v.addWidget(sep)
+        mlbl = QLabel("Meeting name (optional)")
+        mlbl.setStyleSheet("font-weight:600;")
+        v.addWidget(mlbl)
+        self.meeting_edit = QLineEdit()
+        self.meeting_edit.setPlaceholderText("e.g. Launch planning sync")
+        self.meeting_edit.returnPressed.connect(self._continue)
+        v.addWidget(self.meeting_edit)
 
-        cid_row = QHBoxLayout()
-        cid_row.addWidget(QLabel("Globus Client ID:"))
-        self.client_id = QLineEdit(os.environ.get("GLOBUS_CLIENT_ID", ""))
-        self.client_id.setPlaceholderText("from app.globus.org/settings/developers")
-        cid_row.addWidget(self.client_id, 1)
-        v.addLayout(cid_row)
+        v.addStretch()
+        cont = QPushButton("Continue →")
+        cont.setObjectName("primary")
+        cont.clicked.connect(self._continue)
+        v.addWidget(cont)
 
-        self.signin_btn = QPushButton("Sign in with Globus")
-        self.signin_btn.setObjectName("primary")
-        self.signin_btn.clicked.connect(self._sign_in)
-        v.addWidget(self.signin_btn)
-
-        self.info = QLabel("")
-        self.info.setWordWrap(True)
-        self.info.setStyleSheet("color:#64748b;")
-        v.addWidget(self.info)
-
-        self.code_edit = QLineEdit()
-        self.code_edit.setPlaceholderText("Paste the authorization code here")
-        self.code_edit.setEnabled(False)
-        v.addWidget(self.code_edit)
-
-        btns = QHBoxLayout()
-        self.complete_btn = QPushButton("Complete sign-in")
-        self.complete_btn.setObjectName("primary")
-        self.complete_btn.setEnabled(False)
-        self.complete_btn.clicked.connect(self._complete)
-        btns.addWidget(self.complete_btn)
-        btns.addStretch()
-        skip = QPushButton("Continue →")
-        skip.setObjectName("primary")
-        skip.clicked.connect(self._skip)
-        btns.addWidget(skip)
-        v.addLayout(btns)
-
-    def _sign_in(self) -> None:
-        import webbrowser
-
-        try:
-            from .auth import GlobusAuth
-
-            self._auth = GlobusAuth(self.client_id.text().strip())
-            url = self._auth.authorize_url()
-        except Exception as exc:
-            QMessageBox.warning(self, "Globus", f"Could not start sign-in: {exc}")
-            return
-        webbrowser.open(url)
-        self.code_edit.setEnabled(True)
-        self.complete_btn.setEnabled(True)
-        self.info.setText(
-            "A browser window opened. Approve access, copy the authorization code, "
-            "and paste it below."
-        )
-
-    def _complete(self) -> None:
-        try:
-            self.identity = self._auth.exchange(self.code_edit.text())
-        except Exception as exc:
-            QMessageBox.warning(self, "Globus", f"Sign-in failed: {exc}")
-            return
-        self.accept()
-
-    def _skip(self) -> None:
-        name = self.name_edit.text().strip()
-        if name:
-            from .auth import Identity
-            self.identity = Identity(username=name, name=name, email="", sub=f"local:{name}")
-        else:
-            self.identity = None
+    def _continue(self) -> None:
+        if self._ask_name:
+            self.user_name = self.name_edit.text().strip()
+        self.meeting_name = self.meeting_edit.text().strip()
         self.accept()
 
 
@@ -1141,9 +1090,21 @@ def run() -> None:
         pass
     app.setStyleSheet(stylesheet)
 
-    login = GlobusLoginDialog()
-    login.exec()
+    from .storage import Store
 
-    win = MainWindow(identity=login.identity)
+    store = Store()
+    saved_name = (store.get_setting("user_name") or "").strip()
+
+    # Show the welcome screen only when we don't yet know the user's name;
+    # afterwards the saved name is reused silently. The meeting name is asked
+    # each run (it's optional and changes meeting-to-meeting).
+    dlg = WelcomeDialog(default_name=saved_name, ask_name=not saved_name)
+    dlg.exec()
+
+    user_name = saved_name or dlg.user_name
+    if dlg.user_name and not saved_name:
+        store.set_setting("user_name", dlg.user_name)
+
+    win = MainWindow(user_name=user_name, meeting_name=dlg.meeting_name)
     win.show()
     sys.exit(app.exec())
