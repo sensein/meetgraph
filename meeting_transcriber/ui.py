@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -328,10 +329,11 @@ class MainWindow(QWidget):
         srow.addWidget(slabel); srow.addStretch()
         self.auto_refresh = QCheckBox("Auto")
         self.auto_refresh.setChecked(True)
-        self.auto_refresh.setToolTip("Summarize automatically as the meeting goes")
+        self.auto_refresh.setToolTip("On by default — the summary regenerates automatically as you talk. "
+                                     "Uncheck only if you'd rather refresh manually with ⟳.")
         srow.addWidget(self.auto_refresh)
         self.summary_btn = QPushButton("⟳")
-        self.summary_btn.setToolTip("Refresh the summary now")
+        self.summary_btn.setToolTip("Refresh the summary now (optional — Auto does this for you)")
         self.summary_btn.setMaximumWidth(40)
         self.summary_btn.clicked.connect(self._run_notes)
         srow.addWidget(self.summary_btn)
@@ -339,22 +341,29 @@ class MainWindow(QWidget):
         self.live_copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._last_summary_md))
         srow.addWidget(self.live_copy_btn)
         rl.addLayout(srow)
-        self.summary_view = QTextEdit()
+        self.summary_view = QTextBrowser()
         self.summary_view.setObjectName("transcript")
-        self.summary_view.setReadOnly(True)
+        self.summary_view.setOpenExternalLinks(True)  # key terms link to Wikipedia
         self.summary_view.setFont(QFont("SF Pro Text", 13))
         self.summary_view.setPlaceholderText(
-            "A live summary (topics · decisions · open questions · action items) "
-            "appears here automatically as you talk."
+            "A live summary (topics · decisions · open questions · action items · key terms) "
+            "appears here automatically as you talk — no button needed."
         )
         rl.addWidget(self.summary_view, 1)
+        self.summary_hint = QLabel(
+            "Generates automatically as you speak. With local models (Ollama / Whisper) "
+            "the first summary can take a while depending on your hardware."
+        )
+        self.summary_hint.setWordWrap(True)
+        self.summary_hint.setStyleSheet("color:#64748b; font-size:11px;")
+        rl.addWidget(self.summary_hint)
         split.addWidget(right)
         split.setSizes([540, 430])
         v.addWidget(split, 1)
 
         # Live auto-summary timer (fires while recording + "Auto" on + new speech).
         self._summary_timer = QTimer(self)
-        self._summary_timer.setInterval(25_000)
+        self._summary_timer.setInterval(15_000)
         self._summary_timer.timeout.connect(self._on_summary_tick)
         return page
 
@@ -665,10 +674,18 @@ class MainWindow(QWidget):
         rel_form = QFormLayout()
         rel_form.setContentsMargins(22, 0, 0, 0)
         self.ext_rel_url = QLineEdit()
-        self.ext_rel_url.setPlaceholderText("postgresql+psycopg://user:password@host:5432/dbname")
+        self.ext_rel_url.setPlaceholderText("postgresql+psycopg://host:5432/dbname  (credentials optional below)")
         rel_form.addRow("Connection URL", self.ext_rel_url)
+        self.ext_rel_user = QLineEdit()
+        self.ext_rel_user.setPlaceholderText("optional — or embed in the URL")
+        rel_form.addRow("Username", self.ext_rel_user)
+        self.ext_rel_pass = QLineEdit()
+        self.ext_rel_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ext_rel_pass.setPlaceholderText("optional — password or access token")
+        rel_form.addRow("Password / token", self.ext_rel_pass)
         rel_hint = QLabel("Needs SQLAlchemy + a driver (e.g. psycopg2-binary, pymysql). "
-                          "Writes a meetgraph_meetings table.")
+                          "Writes a meetgraph_meetings table. Username/password here are "
+                          "merged into the URL if set.")
         rel_hint.setStyleSheet(_HINT)
         rel_hint.setWordWrap(True)
         rel_form.addRow("", rel_hint)
@@ -976,7 +993,8 @@ class MainWindow(QWidget):
         s = self.store.set_setting
         s("ai.provider", self.ai_provider.currentData() or "")
         s("ui.auto_notes", "1" if self.auto_notes.isChecked() else "0")
-        s("ui.auto_refresh", "1" if self.auto_refresh.isChecked() else "0")
+        # NB: live "Auto" summary is intentionally NOT persisted — it always
+        # starts on so summaries generate automatically with no button.
         s("t.engine", self.engine_combo.currentData() or "")
         s("t.language", self.lang_edit.text())
         s("t.local_model", self.model_combo.currentText())
@@ -1016,9 +1034,7 @@ class MainWindow(QWidget):
         an = g("ui.auto_notes")
         if an is not None:
             self.auto_notes.setChecked(an == "1")
-        ar = g("ui.auto_refresh")
-        if ar is not None:
-            self.auto_refresh.setChecked(ar == "1")
+        # live "Auto" summary is not restored from settings — always starts on.
         hf = g("t.hf_token")
         if hf:
             self.hf_token_edit.setText(hf)
@@ -1040,7 +1056,8 @@ class MainWindow(QWidget):
     def _wire_external_persistence(self) -> None:
         for w in (self.ext_rel_enable, self.ext_graph_enable):
             w.toggled.connect(self._persist_external)
-        for w in (self.ext_rel_url, self.ext_graph_store, self.ext_graph_update,
+        for w in (self.ext_rel_url, self.ext_rel_user, self.ext_rel_pass,
+                  self.ext_graph_store, self.ext_graph_update,
                   self.ext_graph_query, self.ext_graph_user, self.ext_graph_pass):
             w.textChanged.connect(self._persist_external)
 
@@ -1050,6 +1067,8 @@ class MainWindow(QWidget):
         s = self.store.set_setting
         s("ext.rel.enabled", "1" if self.ext_rel_enable.isChecked() else "0")
         s("ext.rel.url", self.ext_rel_url.text().strip())
+        s("ext.rel.user", self.ext_rel_user.text().strip())
+        s("ext.rel.password", self.ext_rel_pass.text())
         s("ext.graph.enabled", "1" if self.ext_graph_enable.isChecked() else "0")
         s("ext.graph.graph_store_url", self.ext_graph_store.text().strip())
         s("ext.graph.update_url", self.ext_graph_update.text().strip())
@@ -1065,6 +1084,8 @@ class MainWindow(QWidget):
             g = self.store.get_setting
             self.ext_rel_enable.setChecked(g("ext.rel.enabled") == "1")
             self.ext_rel_url.setText(g("ext.rel.url") or "")
+            self.ext_rel_user.setText(g("ext.rel.user") or "")
+            self.ext_rel_pass.setText(g("ext.rel.password") or "")
             self.ext_graph_enable.setChecked(g("ext.graph.enabled") == "1")
             self.ext_graph_store.setText(g("ext.graph.graph_store_url") or "")
             self.ext_graph_update.setText(g("ext.graph.update_url") or "")
@@ -1081,6 +1102,8 @@ class MainWindow(QWidget):
             relational=RelationalConfig(
                 enabled=self.ext_rel_enable.isChecked(),
                 url=self.ext_rel_url.text().strip(),
+                user=self.ext_rel_user.text().strip(),
+                password=self.ext_rel_pass.text(),
             ),
             graph=GraphConfig(
                 enabled=self.ext_graph_enable.isChecked(),
@@ -1103,10 +1126,10 @@ class MainWindow(QWidget):
     def _test_relational(self) -> None:
         from .external import RelationalSink
 
-        url = self.ext_rel_url.text().strip()
+        rel = self._current_external_cfg().relational
         self.ext_rel_status.setText("Testing…")
         self._run_async(
-            lambda: RelationalSink(url).test(),
+            lambda: RelationalSink(rel.url, rel.user, rel.password).test(),
             lambda msg, ok: self.ext_rel_status.setText(("✓ " if ok else "⚠ ") + msg),
         )
 
@@ -1585,9 +1608,9 @@ class NotesDialog(QDialog):
         heading = QLabel("Structured meeting notes")
         heading.setObjectName("HeaderTitle")
         layout.addWidget(heading)
-        view = QTextEdit()
+        view = QTextBrowser()
         view.setObjectName("transcript")
-        view.setReadOnly(True)
+        view.setOpenExternalLinks(True)  # clickable Wikipedia/Wikidata links
         view.setMarkdown(markdown)
         view.setFont(QFont("SF Pro Text", 13))
         layout.addWidget(view, 1)
@@ -1682,9 +1705,9 @@ class MeetingDetailDialog(QDialog):
         scope_row.addStretch()
         v.addLayout(scope_row)
 
-        self._view = QTextEdit()
+        self._view = QTextBrowser()
         self._view.setObjectName("transcript")
-        self._view.setReadOnly(True)
+        self._view.setOpenExternalLinks(True)  # clickable Wikipedia/Wikidata links
         self._view.setFont(QFont("SF Pro Text", 13))
         v.addWidget(self._view, 1)
         self._update_view()

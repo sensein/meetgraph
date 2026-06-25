@@ -100,7 +100,14 @@ only if stated). Empty categories are empty lists, not invented content.
 might want to look up: named entities, technologies, tools, methods, standards, organisations, \
 domain concepts. Use the canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words and \
 anything not in the transcript. Leave the wikipedia/wikidata fields null — they are filled \
-automatically; never invent a URL."""
+automatically; never invent a URL.
+10. Fix transcription errors. The text comes from automatic speech-to-text and contains \
+mis-recognised words, wrong homophones, dropped punctuation, and garbled proper nouns. Silently \
+correct obvious errors to the word the speaker clearly meant, using surrounding context (e.g. \
+"mid-graph" -> "MeetGraph", "best off" -> "best of", "Green Gria" -> the real name if recoverable). \
+This is cleanup of recognition mistakes, not invention: never change the actual meaning, add facts, \
+or "correct" something that was genuinely said. If a garbled term can't be confidently recovered, \
+leave it out of key_terms rather than guessing."""
 
 
 # --------------------------------------------------------------------------- #

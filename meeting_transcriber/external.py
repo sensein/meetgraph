@@ -31,7 +31,9 @@ from . import kg
 @dataclass
 class RelationalConfig:
     enabled: bool = False
-    url: str = ""  # e.g. postgresql+psycopg://user:pass@host:5432/dbname
+    url: str = ""        # e.g. postgresql+psycopg://host:5432/dbname
+    user: str = ""       # optional — injected into the URL if set
+    password: str = ""   # optional — password or access token
 
 
 @dataclass
@@ -50,7 +52,10 @@ class ExternalConfig:
     graph: GraphConfig = field(default_factory=GraphConfig)
 
 
-_REL_KEYS = {"enabled": "ext.rel.enabled", "url": "ext.rel.url"}
+_REL_KEYS = {
+    "enabled": "ext.rel.enabled", "url": "ext.rel.url",
+    "user": "ext.rel.user", "password": "ext.rel.password",
+}
 _GRAPH_KEYS = {
     "enabled": "ext.graph.enabled", "query_url": "ext.graph.query_url",
     "graph_store_url": "ext.graph.graph_store_url", "update_url": "ext.graph.update_url",
@@ -64,6 +69,8 @@ def load_config(get_setting) -> ExternalConfig:
     rel = RelationalConfig(
         enabled=b(get_setting(_REL_KEYS["enabled"])),
         url=get_setting(_REL_KEYS["url"]) or "",
+        user=get_setting(_REL_KEYS["user"]) or "",
+        password=get_setting(_REL_KEYS["password"]) or "",
     )
     g = GraphConfig(
         enabled=b(get_setting(_GRAPH_KEYS["enabled"])),
@@ -86,18 +93,26 @@ _MEETING_COLS = [
 
 
 class RelationalSink:
-    def __init__(self, url: str):
+    def __init__(self, url: str, user: str = "", password: str = ""):
         if not url.strip():
             raise ValueError("No database URL configured.")
         try:
             from sqlalchemy import create_engine
+            from sqlalchemy.engine import make_url
         except ImportError as exc:  # pragma: no cover - dependency hint
             raise RuntimeError(
                 "SQLAlchemy is required for relational export. "
                 "Install it with: pip install sqlalchemy (plus your DB driver, "
                 "e.g. psycopg2-binary for PostgreSQL or pymysql for MySQL)."
             ) from exc
-        self._engine = create_engine(url, pool_pre_ping=True)
+        # Inject separately-entered credentials/token into the URL when present
+        # (a user/password embedded directly in the URL still works on its own).
+        u = make_url(url)
+        if user:
+            u = u.set(username=user)
+        if password:
+            u = u.set(password=password)
+        self._engine = create_engine(u, pool_pre_ping=True)
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -201,7 +216,9 @@ def push_meeting(rec: dict, cfg: ExternalConfig, prev_ids=None) -> dict[str, str
 
     if cfg.relational.enabled and cfg.relational.url:
         try:
-            RelationalSink(cfg.relational.url).upsert(rec)
+            RelationalSink(
+                cfg.relational.url, cfg.relational.user, cfg.relational.password
+            ).upsert(rec)
             results["relational"] = "ok"
         except Exception as exc:
             results["relational"] = f"{type(exc).__name__}: {exc}"

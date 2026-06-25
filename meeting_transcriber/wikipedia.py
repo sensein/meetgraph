@@ -14,10 +14,28 @@ simply returned without links (it stays plain text in the notes).
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+
+_STOPWORDS = {"the", "of", "a", "an", "and", "to", "in", "on", "for", "is", "at", "by"}
+
+
+def _tokens(s: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+            if len(w) >= 3 and w not in _STOPWORDS}
+
+
+def _reasonable_match(term: str, title: str) -> bool:
+    """A search hit is trustworthy only if it shares a real word with the query.
+
+    Stops garbled ASR phrases (e.g. "Base of Green Gria") from being linked to a
+    confidently-wrong article the full-text search happened to surface.
+    """
+    tt = _tokens(term)
+    return bool(tt and tt & _tokens(title))
 
 _API = "https://en.wikipedia.org/w/api.php"
 _UA = "MeetGraph/0.1 (https://tekrajchhetri.com; meeting knowledge-graph app)"
@@ -85,7 +103,7 @@ def _resolve_one(term: str) -> TermLink | None:
             # 2) Fall back to a search, then fetch that page for the wikidata id.
             sdata = _get({"action": "query", "list": "search", "srsearch": term, "srlimit": "1"})
             hits = (sdata.get("query") or {}).get("search") or []
-            if hits:
+            if hits and _reasonable_match(term, hits[0]["title"]):
                 found = hits[0]["title"]
                 pdata = _get({
                     "action": "query", "titles": found, "redirects": "1",
