@@ -684,9 +684,10 @@ class MainWindow(QWidget):
         self.diarize_combo.addItem("Label speakers (local)", "local")
         self.diarize_combo.addItem("Off (by source)", "off")
         self.diarize_combo.setToolTip(
-            "Label distinct speakers (Speaker 1/2/…) using local diarization (pyannote + a "
-            "HuggingFace token). Cloud APIs like OpenAI don't return speaker labels, so this runs "
-            "on-device. If unavailable, falls back to labelling by audio source.")
+            "Label distinct speakers (Speaker 1/2/…) on-device. Works out of the box with "
+            "Resemblyzer (pip install resemblyzer — no token); pyannote.audio is an alternative. "
+            "Cloud APIs (OpenAI) don't return speaker labels. Falls back to audio-source labels "
+            "if no backend is installed.")
         row.addWidget(self.diarize_combo)
         row.addStretch()
         engine_layout.addLayout(row)

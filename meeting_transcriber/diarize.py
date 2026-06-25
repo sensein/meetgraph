@@ -50,33 +50,55 @@ class OnlineDiarizer:
 
 
 class SpeakerLabeler:
-    """Embeds an utterance and returns a consistent speaker label, or None."""
+    """Embeds an utterance and returns a consistent speaker label, or None.
 
-    def __init__(self, hf_token: str | None = None, threshold: float = 0.70):
+    Prefers **Resemblyzer** (bundled model, no token, no download) and falls back
+    to **pyannote.audio** (needs a HuggingFace token) if Resemblyzer isn't present.
+    """
+
+    def __init__(self, hf_token: str | None = None, threshold: float = 0.72):
         self._diar = OnlineDiarizer(threshold)
-        self._inf = None
-        self._ok = False
-        try:
-            from pyannote.audio import Inference, Model
+        self._embed = None
+        self.backend = None
 
-            model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token or True)
-            self._inf = Inference(model, window="whole")
-            self._ok = True
+        # 1) Resemblyzer — token-free, model ships with the package.
+        try:
+            from resemblyzer import VoiceEncoder
+
+            enc = VoiceEncoder(verbose=False)
+            self._embed = lambda audio, rate: enc.embed_utterance(
+                np.ascontiguousarray(audio, dtype="float32"))
+            self.backend = "resemblyzer"
         except Exception:
-            self._ok = False  # pyannote/model/token unavailable -> diarization disabled
+            self._embed = None
+
+        # 2) pyannote fallback (gated model -> needs a HF token).
+        if self._embed is None:
+            try:
+                import torch
+                from pyannote.audio import Inference, Model
+
+                model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token or True)
+                inf = Inference(model, window="whole")
+
+                def _emb(audio, rate):
+                    wav = torch.from_numpy(np.ascontiguousarray(audio, dtype="float32")).unsqueeze(0)
+                    return np.asarray(inf({"waveform": wav, "sample_rate": rate})).reshape(-1)
+
+                self._embed = _emb
+                self.backend = "pyannote"
+            except Exception:
+                self._embed = None
 
     @property
     def available(self) -> bool:
-        return self._ok
+        return self._embed is not None
 
     def label(self, audio: np.ndarray, rate: int = 16_000) -> str | None:
-        if not self._ok:
-            return None
+        if self._embed is None or audio is None or len(audio) < int(0.4 * rate):
+            return None  # too short to embed reliably -> fall back to source label
         try:
-            import torch
-
-            wav = torch.from_numpy(np.ascontiguousarray(audio, dtype="float32")).unsqueeze(0)
-            emb = self._inf({"waveform": wav, "sample_rate": rate})
-            return self._diar.assign(np.asarray(emb).reshape(-1))
+            emb = np.asarray(self._embed(audio, rate)).reshape(-1)
+            return self._diar.assign(emb)
         except Exception:
             return None
