@@ -84,6 +84,8 @@ classes:
       - has_action_item
       - has_open_question
       - has_key_term
+      - references
+      - research_gap
       - previous_meeting
       - related_meeting
       - part_of_team
@@ -173,6 +175,19 @@ classes:
       - schema:Organization
     slots:
       - name
+
+  Publication:
+    is_a: NamedThing
+    description: >-
+      A scientific publication (e.g. from PubMed) the meeting's topics relate to,
+      linked automatically for scientific discussions.
+    close_mappings:
+      - schema:ScholarlyArticle
+    slots:
+      - title
+      - doi
+      - pub_url
+      - bibliographic_citation
 
   Transcript:
     is_a: NamedThing
@@ -310,6 +325,18 @@ slots:
     multivalued: true
     inlined_as_list: true
     description: Salient key terms mentioned in the meeting, linked to external sources.
+  references:
+    slot_uri: dcterms:references
+    exact_mappings: [dcterms:references]
+    close_mappings: [schema:citation]
+    range: Publication
+    multivalued: true
+    inlined_as_list: true
+    description: Scientific publications the meeting relates to (auto-linked from PubMed).
+  research_gap:
+    range: string
+    multivalued: true
+    description: Research gaps / open problems raised, relative to the literature.
 
   # --- Topic ---
   pref_label:
@@ -412,6 +439,24 @@ slots:
     close_mappings: [skos:exactMatch, schema:sameAs]
     range: uri
     description: Wikidata entity URI for the term (verified, never guessed).
+
+  # --- Publication ---
+  doi:
+    slot_uri: owl:sameAs
+    exact_mappings: [owl:sameAs]
+    close_mappings: [schema:identifier]
+    range: uri
+    description: The publication's DOI (as a https://doi.org/ URI).
+  pub_url:
+    slot_uri: rdfs:seeAlso
+    exact_mappings: [rdfs:seeAlso]
+    close_mappings: [schema:url]
+    range: uri
+    description: Canonical URL of the publication (e.g. PubMed).
+  bibliographic_citation:
+    slot_uri: dcterms:bibliographicCitation
+    exact_mappings: [dcterms:bibliographicCitation]
+    description: Human-readable citation (authors, journal, year).
 
   # --- Transcript / Agent ---
   in_language:

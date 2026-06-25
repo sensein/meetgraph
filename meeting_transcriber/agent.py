@@ -61,6 +61,17 @@ class KeyTerm(BaseModel):
     wikidata: str | None = Field(None, description="Leave null; resolved automatically.")
 
 
+class Publication(BaseModel):
+    title: str
+    pmid: str | None = None
+    journal: str | None = None
+    year: str | None = None
+    authors: str | None = None
+    doi: str | None = None
+    url: str | None = None
+    relevance: str | None = Field(None, description="Why this paper is relevant to the discussion.")
+
+
 class MeetingSummary(BaseModel):
     meeting: MeetingInfo
     topics: list[Topic] = Field(default_factory=list)
@@ -71,6 +82,9 @@ class MeetingSummary(BaseModel):
         default_factory=list,
         description="Salient terms worth looking up — named entities, technologies, methods, organisations.",
     )
+    # Filled by link_literature() for scientific discussions — not by the main pass.
+    publications: list[Publication] = Field(default_factory=list)
+    research_gaps: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +302,79 @@ def link_key_terms(summary: MeetingSummary) -> MeetingSummary:
     return summary
 
 
+def link_literature(
+    summary: MeetingSummary,
+    api_key: str | None = None,
+    max_results: int = 8,
+    provider_cfg: dict | None = None,
+) -> MeetingSummary:
+    """For a scientific discussion, attach relevant PubMed publications + research gaps.
+
+    Searches PubMed using the meeting's key terms. When a model provider is given,
+    an LLM judges whether the discussion is scientific, picks the genuinely relevant
+    papers (with a one-line reason), and proposes research gaps relative to the
+    literature. Without a provider it simply attaches the top results. Best-effort:
+    any failure leaves the summary unchanged.
+    """
+    terms = [kt.term for kt in summary.key_terms if kt.term]
+    if not terms:
+        return summary
+    try:
+        from . import pubmed
+    except Exception:
+        return summary
+    articles = pubmed.search(pubmed.build_query(terms), api_key=api_key, retmax=max_results)
+    if not articles:
+        return summary
+
+    pubs = [Publication(**a.to_dict()) for a in articles]
+
+    if provider_cfg and provider_cfg.get("provider"):
+        try:
+            from pydantic import BaseModel, Field
+            from pydantic_ai import Agent, PromptedOutput
+
+            class _Rel(BaseModel):
+                pmid: str
+                relevance: str = Field(description="one short sentence on why it's relevant")
+
+            class _Sci(BaseModel):
+                is_scientific: bool = Field(description="Is this a scientific/research discussion?")
+                relevant: list[_Rel] = Field(default_factory=list)
+                gaps: list[str] = Field(default_factory=list,
+                                        description="research gaps/open problems vs. the literature")
+
+            provider = provider_cfg["provider"]
+            model = _build_model(provider, provider_cfg.get("model") or None,
+                                 provider_cfg.get("api_key") or None, provider_cfg.get("base_url") or None)
+            output_type = PromptedOutput(_Sci) if provider in ("opensource", "openrouter") else _Sci
+            agent = Agent(model, output_type=output_type, retries=2, system_prompt=(
+                "You connect a meeting to the scientific literature. Decide if the discussion is "
+                "scientific/research-oriented. If so, select the genuinely relevant papers from the "
+                "candidates (by pmid) with a one-line reason, and list concrete research gaps or open "
+                "questions the discussion raises relative to that literature. If it is not scientific, "
+                "set is_scientific=false and return empty lists. Use only the given candidate pmids."))
+            topics = "; ".join(f"{t.topic}: {', '.join(t.points[:3])}" for t in summary.topics[:8])
+            cand = "\n".join(f"pmid={a.pmid} | {a.title} ({a.journal} {a.year})" for a in articles)
+            result = agent.run_sync(
+                f"Discussion topics:\n{topics}\n\nKey terms: {', '.join(terms)}\n\n"
+                f"Candidate papers:\n{cand}\n\nReturn the assessment.")
+            sci = result.output
+            if not sci.is_scientific:
+                return summary  # not a scientific meeting -> no literature section
+            reasons = {r.pmid: r.relevance for r in sci.relevant}
+            if reasons:
+                pubs = [p for p in pubs if p.pmid in reasons]
+                for p in pubs:
+                    p.relevance = reasons.get(p.pmid)
+            summary.research_gaps = list(sci.gaps)
+        except Exception:
+            pass  # keep the unfiltered top results
+
+    summary.publications = pubs
+    return summary
+
+
 def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> str:
     """Render a MeetingSummary as readable Markdown notes (skill mode A shape)."""
     m = summary.meeting
@@ -334,6 +421,21 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
             gloss = f" — {kt.description}" if kt.description else ""
             lines.append(f"- {label}{gloss}")
         lines.append("")
+
+    if summary.publications:
+        lines += ["## Related publications", ""]
+        for p in summary.publications:
+            cite = f"[{p.title}]({p.url})" if p.url else p.title
+            meta = " · ".join(x for x in [p.journal, p.year] if x)
+            tail = f"  _{p.relevance}_" if p.relevance else ""
+            line = f"- {cite}" + (f" — {meta}" if meta else "")
+            if p.authors:
+                line += f". {p.authors}"
+            lines.append(line + tail)
+        lines.append("")
+
+    if summary.research_gaps:
+        lines += ["## Research gaps", ""] + [f"- {g}" for g in summary.research_gaps] + [""]
 
     return "\n".join(lines).rstrip() + "\n"
 

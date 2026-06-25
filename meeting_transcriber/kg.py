@@ -53,6 +53,10 @@ PROV_ASSOCIATED = NamedNode("http://www.w3.org/ns/prov#wasAssociatedWith")
 PROV_ATTRIBUTED = NamedNode("http://www.w3.org/ns/prov#wasAttributedTo")
 PROV_INFORMEDBY = NamedNode("http://www.w3.org/ns/prov#wasInformedBy")
 SCHEMA_ISPARTOF = NamedNode("http://schema.org/isPartOf")
+DCT_REFERENCES = NamedNode("http://purl.org/dc/terms/references")
+DCT_BIBLIO = NamedNode("http://purl.org/dc/terms/bibliographicCitation")
+C_PUBLICATION = NamedNode("http://schema.org/ScholarlyArticle")
+P_RESEARCH_GAP = NamedNode(MCO + "research_gap")
 SKOS_RELATED = NamedNode("http://www.w3.org/2004/02/skos/core#related")
 DCT_RELATION = NamedNode("http://purl.org/dc/terms/relation")
 RDFS_COMMENT = NamedNode("http://www.w3.org/2000/01/rdf-schema#comment")
@@ -268,6 +272,25 @@ def quads_for_meeting(
         if kt.get("wikidata"):
             yield q(node, OWL_SAMEAS, NamedNode(kt["wikidata"]))
         yield q(m, P_HAS_KEYTERM, node)
+
+    # Related scientific publications (PubMed) + research gaps
+    for i, pub in enumerate(summary.get("publications") or []):
+        node = NamedNode(f"{meeting_iri(mid)}/publication/{i}")
+        yield q(node, RDF_TYPE, C_PUBLICATION)
+        if pub.get("title"):
+            yield q(node, DCT_TITLE, Literal(pub["title"]))
+            yield q(node, RDFS_LABEL, Literal(pub["title"]))
+        if pub.get("url"):
+            yield q(node, RDFS_SEEALSO, NamedNode(pub["url"]))
+        if pub.get("doi"):
+            yield q(node, OWL_SAMEAS, NamedNode("https://doi.org/" + pub["doi"]))
+        cite = " ".join(x for x in [pub.get("authors"), pub.get("journal"), pub.get("year")] if x)
+        if cite:
+            yield q(node, DCT_BIBLIO, Literal(cite))
+        yield q(m, DCT_REFERENCES, node)
+    for gap in summary.get("research_gaps") or []:
+        if gap:
+            yield q(m, P_RESEARCH_GAP, Literal(gap))
 
     # Team membership (centralized, shared knowledge graph)
     team_id = rec.get("team_id")

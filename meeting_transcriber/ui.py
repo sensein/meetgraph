@@ -606,6 +606,7 @@ class MainWindow(QWidget):
         v.addWidget(self._build_team_box())
         v.addWidget(self._build_email_box())
         v.addWidget(self._build_integrations_box())
+        v.addWidget(self._build_pubmed_box())
         v.addStretch()
 
         scroll = QScrollArea()
@@ -1119,6 +1120,30 @@ class MainWindow(QWidget):
         outer.addLayout(mform)
         return box
 
+    def _build_pubmed_box(self) -> QGroupBox:
+        box = QGroupBox("Scientific literature — link the discussion to PubMed publications & gaps")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+        self.pubmed_enable = QCheckBox("Find relevant PubMed publications and research gaps for scientific meetings")
+        outer.addWidget(self.pubmed_enable)
+        form = QFormLayout()
+        form.setContentsMargins(22, 0, 0, 0)
+        self.pubmed_token = QLineEdit()
+        self.pubmed_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pubmed_token.setPlaceholderText("NCBI API key (optional — speeds up / raises rate limit)")
+        form.addRow("NCBI API key", self.pubmed_token)
+        self.pubmed_max = QLineEdit("8")
+        self.pubmed_max.setMaximumWidth(70)
+        form.addRow("Max papers", self.pubmed_max)
+        outer.addLayout(form)
+        hint = QLabel("After a meeting is summarized, MeetGraph searches PubMed using the key terms; "
+                      "your AI model judges relevance and proposes research gaps. Get a free key at "
+                      "ncbi.nlm.nih.gov/account. Best results with a capable model.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#64748b; font-size:11px;")
+        outer.addWidget(hint)
+        return box
+
     def _current_delivery_cfg(self):
         from .delivery import DeliveryConfig, McpConfig, RestConfig
 
@@ -1582,9 +1607,11 @@ class MainWindow(QWidget):
         for w in (self.rest_enable, self.mcp_enable):
             w.toggled.connect(self._persist_integrations)
         for w in (self.rest_url, self.rest_auth, self.rest_headers,
-                  self.mcp_url, self.mcp_tool, self.mcp_token):
+                  self.mcp_url, self.mcp_tool, self.mcp_token,
+                  self.pubmed_token, self.pubmed_max):
             w.textChanged.connect(self._persist_integrations)
         self.rest_method.currentIndexChanged.connect(self._persist_integrations)
+        self.pubmed_enable.toggled.connect(self._persist_integrations)
 
     def _persist_external(self) -> None:
         if self._loading:
@@ -1634,6 +1661,9 @@ class MainWindow(QWidget):
         s("mcp.url", self.mcp_url.text().strip())
         s("mcp.tool", self.mcp_tool.text().strip())
         s("mcp.token", self.mcp_token.text())
+        s("pubmed.enabled", "1" if self.pubmed_enable.isChecked() else "0")
+        s("pubmed.api_key", self.pubmed_token.text().strip())
+        s("pubmed.max", self.pubmed_max.text().strip() or "8")
 
     def _load_integrations_config(self) -> None:
         prev, self._loading = self._loading, True
@@ -1650,6 +1680,9 @@ class MainWindow(QWidget):
             self.mcp_url.setText(g("mcp.url") or "")
             self.mcp_tool.setText(g("mcp.tool") or "")
             self.mcp_token.setText(g("mcp.token") or "")
+            self.pubmed_enable.setChecked(g("pubmed.enabled") == "1")
+            self.pubmed_token.setText(g("pubmed.api_key") or "")
+            self.pubmed_max.setText(g("pubmed.max") or "8")
         finally:
             self._loading = prev
 
@@ -2216,6 +2249,55 @@ class MainWindow(QWidget):
 
         self._run_async(work, done)
 
+    def _literature_async(self, meeting_id) -> None:
+        """For a scientific meeting, attach relevant PubMed papers + research gaps."""
+        if meeting_id is None or not self.pubmed_enable.isChecked():
+            return
+        api_key = self.pubmed_token.text().strip()
+        try:
+            max_results = int(self.pubmed_max.text().strip() or "8")
+        except ValueError:
+            max_results = 8
+        provider_cfg = {
+            "provider": self.ai_provider.currentData(),
+            "model": self.ai_model.currentText().strip(),
+            "api_key": self.ai_key.text().strip(),
+            "base_url": self.ai_base.text().strip(),
+        }
+
+        def work():
+            from .agent import MeetingSummary, link_literature, summary_to_markdown
+
+            rec = self.store.get_meeting(meeting_id)
+            if not rec or not rec.get("summary_json"):
+                return ""
+            try:
+                summary = MeetingSummary.model_validate_json(rec["summary_json"])
+            except Exception:
+                return ""
+            link_literature(summary, api_key=api_key or None,
+                            max_results=max_results, provider_cfg=provider_cfg)
+            if not summary.publications:
+                return "No relevant publications found."
+            md = summary_to_markdown(summary, title=rec.get("title"))
+            self.store.update_summary(meeting_id, md, summary.model_dump_json(indent=2))
+            return f"Linked {len(summary.publications)} publication(s)" + (
+                f" · {len(summary.research_gaps)} research gap(s)." if summary.research_gaps else ".")
+
+        def done(msg, ok):
+            if msg:
+                self._set_summary_status(msg)
+            self._refresh_meetings()
+            if meeting_id == self._meeting_id:  # refresh the live view + re-sync
+                rec = self.store.get_meeting(meeting_id)
+                if rec and rec.get("summary_md"):
+                    self._last_summary_md = rec["summary_md"]
+                    self._last_summary_json = rec.get("summary_json") or ""
+                    self.summary_view.setMarkdown(rec["summary_md"])
+                self._push_external_async(meeting_id)
+
+        self._run_async(work, done)
+
     # ----- model prewarming (avoid cold start) -----
     def _maybe_prewarm(self) -> None:
         if self.controller.running:
@@ -2314,6 +2396,7 @@ class MainWindow(QWidget):
             if not self.controller.running:
                 self._audit("summary_generated", self._meeting_id)
                 self._crosslink_async(self._meeting_id)
+                self._literature_async(self._meeting_id)
 
     def _on_notes_failed(self, msg: str) -> None:
         self._notes_busy = False
