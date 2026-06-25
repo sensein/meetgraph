@@ -30,6 +30,7 @@ from pyoxigraph import DefaultGraph, Literal, NamedNode, Quad, RdfFormat, Store
 # --- namespaces ------------------------------------------------------------ #
 MCO = "https://tekrajchhetri.com/mco/"            # ontology terms
 BASE = "https://tekrajchhetri.com/meetgraph/"      # instance data
+MEETGRAPH_NG = "https://tekrajchhetri.com/meetgraph"  # the "meetgraph" named graph
 
 RDF_TYPE = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
 RDFS_LABEL = NamedNode("http://www.w3.org/2000/01/rdf-schema#label")
@@ -40,6 +41,10 @@ DCT_DESCRIPTION = NamedNode("http://purl.org/dc/terms/description")
 SKOS_PREFLABEL = NamedNode("http://www.w3.org/2004/02/skos/core#prefLabel")
 FOAF_NAME = NamedNode("http://xmlns.com/foaf/0.1/name")
 PROV_ATTIME = NamedNode("http://www.w3.org/ns/prov#atTime")
+PROV_STARTED = NamedNode("http://www.w3.org/ns/prov#startedAtTime")
+PROV_ENDED = NamedNode("http://www.w3.org/ns/prov#endedAtTime")
+PROV_GENERATED = NamedNode("http://www.w3.org/ns/prov#generatedAtTime")
+DCT_DATE = NamedNode("http://purl.org/dc/terms/date")
 PROV_ASSOCIATED = NamedNode("http://www.w3.org/ns/prov#wasAssociatedWith")
 PROV_ATTRIBUTED = NamedNode("http://www.w3.org/ns/prov#wasAttributedTo")
 PROV_INFORMEDBY = NamedNode("http://www.w3.org/ns/prov#wasInformedBy")
@@ -142,9 +147,20 @@ def quads_for_meeting(
     yield q(m, DCT_TITLE, Literal(title))
     if meeting.get("purpose"):
         yield q(m, DCT_DESCRIPTION, Literal(meeting["purpose"]))
-    when = _dt_literal(rec.get("started_at") or meeting.get("date") or rec.get("created_at"))
-    if when is not None:
-        yield q(m, PROV_ATTIME, when)
+    # Temporal provenance (PROV): a Meeting is a prov:Activity with a start/end;
+    # the notes are generated at created_at; the stated calendar date is dcterms:date.
+    started = _dt_literal(rec.get("started_at"))
+    if started is not None:
+        yield q(m, PROV_STARTED, started)
+        yield q(m, PROV_ATTIME, started)  # also a single timestamp for simple consumers
+    ended = _dt_literal(rec.get("ended_at"))
+    if ended is not None:
+        yield q(m, PROV_ENDED, ended)
+    generated = _dt_literal(rec.get("created_at"))
+    if generated is not None:
+        yield q(m, PROV_GENERATED, generated)
+    if meeting.get("date"):
+        yield q(m, DCT_DATE, _dt_literal(meeting["date"]) or Literal(meeting["date"]))
 
     # Agents (participants + any owner/attribution), minted once per name.
     agents: dict[str, NamedNode] = {}

@@ -73,6 +73,9 @@ classes:
     slots:
       - title
       - meeting_date
+      - started_at_time
+      - ended_at_time
+      - generated_at_time
       - purpose
       - participant
       - transcript
@@ -204,9 +207,28 @@ slots:
     exact_mappings: [dcterms:description]
     description: Purpose or context of the meeting.
   meeting_date:
-    close_mappings: [prov:atTime, schema:startDate, dcterms:date]
+    slot_uri: dcterms:date
+    exact_mappings: [dcterms:date]
+    close_mappings: [prov:atTime, schema:startDate]
     range: datetime
-    description: When the meeting took place.
+    description: The stated calendar date the meeting took place, if given in the transcript.
+  started_at_time:
+    slot_uri: prov:startedAtTime
+    exact_mappings: [prov:startedAtTime]
+    close_mappings: [schema:startDate]
+    range: datetime
+    description: When the meeting (a prov:Activity) started being recorded.
+  ended_at_time:
+    slot_uri: prov:endedAtTime
+    exact_mappings: [prov:endedAtTime]
+    close_mappings: [schema:endDate]
+    range: datetime
+    description: When the meeting recording ended.
+  generated_at_time:
+    slot_uri: prov:generatedAtTime
+    exact_mappings: [prov:generatedAtTime]
+    range: datetime
+    description: When the notes / RDF were generated from the meeting.
   participant:
     slot_uri: prov:wasAssociatedWith
     exact_mappings: [prov:wasAssociatedWith]

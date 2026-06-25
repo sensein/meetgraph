@@ -40,8 +40,9 @@ class RelationalConfig:
 class GraphConfig:
     enabled: bool = False
     query_url: str = ""        # SPARQL query endpoint (for connection test)
-    graph_store_url: str = ""  # SPARQL Graph Store Protocol endpoint (HTTP PUT)
-    update_url: str = ""       # SPARQL Update endpoint (fallback if no graph store)
+    graph_store_url: str = ""  # SPARQL Graph Store Protocol endpoint (HTTP PUT/POST/DELETE)
+    update_url: str = ""       # SPARQL Update endpoint (preferred — enables incremental replace)
+    named_graph: str = kg.MEETGRAPH_NG  # all meetings live in this one "meetgraph" named graph
     user: str = ""
     password: str = ""
 
@@ -59,6 +60,7 @@ _REL_KEYS = {
 _GRAPH_KEYS = {
     "enabled": "ext.graph.enabled", "query_url": "ext.graph.query_url",
     "graph_store_url": "ext.graph.graph_store_url", "update_url": "ext.graph.update_url",
+    "named_graph": "ext.graph.named_graph",
     "user": "ext.graph.user", "password": "ext.graph.password",
 }
 
@@ -77,6 +79,7 @@ def load_config(get_setting) -> ExternalConfig:
         query_url=get_setting(_GRAPH_KEYS["query_url"]) or "",
         graph_store_url=get_setting(_GRAPH_KEYS["graph_store_url"]) or "",
         update_url=get_setting(_GRAPH_KEYS["update_url"]) or "",
+        named_graph=get_setting(_GRAPH_KEYS["named_graph"]) or kg.MEETGRAPH_NG,
         user=get_setting(_GRAPH_KEYS["user"]) or "",
         password=get_setting(_GRAPH_KEYS["password"]) or "",
     )
@@ -116,27 +119,100 @@ class RelationalSink:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        from sqlalchemy import (BigInteger, Column, MetaData, Table, Text)
+        """A normalized 'meetgraph' schema: one parent table + relevant child tables."""
+        from sqlalchemy import (BigInteger, Column, Integer, MetaData, Table, Text)
 
         self._meta = MetaData()
-        self._table = Table(
-            "meetgraph_meetings", self._meta,
-            Column("id", BigInteger, primary_key=True),
-            Column("user", Text), Column("title", Text),
-            Column("started_at", Text), Column("ended_at", Text),
-            Column("transcript_md", Text), Column("transcript_plain", Text),
-            Column("summary_md", Text), Column("summary_json", Text),
-            Column("created_at", Text),
-        )
+        fk = lambda: Column("meeting_id", BigInteger, index=True)  # noqa: E731
+        pk = lambda: Column("id", Integer, primary_key=True, autoincrement=True)  # noqa: E731
+        self._t = {
+            "meetings": Table(
+                "meetgraph_meetings", self._meta,
+                Column("id", BigInteger, primary_key=True),
+                Column("user", Text), Column("title", Text),
+                Column("started_at", Text), Column("ended_at", Text),
+                Column("purpose", Text),
+                Column("transcript_md", Text), Column("transcript_plain", Text),
+                Column("summary_md", Text), Column("summary_json", Text),
+                Column("created_at", Text),
+            ),
+            "participants": Table(
+                "meetgraph_participants", self._meta, pk(), fk(), Column("name", Text),
+            ),
+            "topics": Table(
+                "meetgraph_topics", self._meta, pk(), fk(),
+                Column("ord", Integer), Column("topic", Text),
+                Column("attribution", Text), Column("points", Text),
+            ),
+            "decisions": Table(
+                "meetgraph_decisions", self._meta, pk(), fk(),
+                Column("ord", Integer), Column("text", Text),
+            ),
+            "open_questions": Table(
+                "meetgraph_open_questions", self._meta, pk(), fk(),
+                Column("ord", Integer), Column("text", Text),
+            ),
+            "action_items": Table(
+                "meetgraph_action_items", self._meta, pk(), fk(),
+                Column("ord", Integer), Column("item", Text),
+                Column("owner", Text), Column("due", Text),
+            ),
+            "key_terms": Table(
+                "meetgraph_key_terms", self._meta, pk(), fk(),
+                Column("term", Text), Column("description", Text),
+                Column("wikipedia", Text), Column("wikidata", Text),
+            ),
+        }
         self._meta.create_all(self._engine)
 
     def upsert(self, rec: dict) -> None:
+        import json as _json
+
         from sqlalchemy import delete, insert
 
-        row = {c: rec.get(c) for c in _MEETING_COLS}
+        mid = rec.get("id")
+        try:
+            summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            summary = {}
+        meeting = summary.get("meeting") or {}
+
+        parent = {c: rec.get(c) for c in _MEETING_COLS}
+        parent["purpose"] = meeting.get("purpose")
+
+        participants = [{"meeting_id": mid, "name": n} for n in (meeting.get("participants") or [])]
+        topics = [
+            {"meeting_id": mid, "ord": i, "topic": t.get("topic"),
+             "attribution": t.get("attribution"), "points": _json.dumps(t.get("points") or [])}
+            for i, t in enumerate(summary.get("topics") or [])
+        ]
+        decisions = [{"meeting_id": mid, "ord": i, "text": d}
+                     for i, d in enumerate(summary.get("decisions") or [])]
+        questions = [{"meeting_id": mid, "ord": i, "text": q}
+                     for i, q in enumerate(summary.get("open_questions") or [])]
+        actions = [
+            {"meeting_id": mid, "ord": i, "item": a.get("item"),
+             "owner": a.get("owner"), "due": a.get("due")}
+            for i, a in enumerate(summary.get("action_items") or [])
+        ]
+        terms = [
+            {"meeting_id": mid, "term": k.get("term"), "description": k.get("description"),
+             "wikipedia": k.get("wikipedia"), "wikidata": k.get("wikidata")}
+            for k in (summary.get("key_terms") or [])
+        ]
+
+        t = self._t
         with self._engine.begin() as conn:
-            conn.execute(delete(self._table).where(self._table.c.id == row["id"]))
-            conn.execute(insert(self._table).values(**row))
+            for name in ("participants", "topics", "decisions", "open_questions",
+                         "action_items", "key_terms"):
+                conn.execute(delete(t[name]).where(t[name].c.meeting_id == mid))
+            conn.execute(delete(t["meetings"]).where(t["meetings"].c.id == mid))
+            conn.execute(insert(t["meetings"]).values(**parent))
+            for name, rows in (("participants", participants), ("topics", topics),
+                               ("decisions", decisions), ("open_questions", questions),
+                               ("action_items", actions), ("key_terms", terms)):
+                if rows:
+                    conn.execute(insert(t[name]), rows)
 
     def test(self) -> str:
         from sqlalchemy import text
@@ -169,21 +245,62 @@ class GraphSink:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.read().decode("utf-8", "replace")
 
+    @property
+    def named_graph(self) -> str:
+        return self.cfg.named_graph or kg.MEETGRAPH_NG
+
+    def _gsp_url(self) -> str:
+        sep = "&" if "?" in self.cfg.graph_store_url else "?"
+        return f"{self.cfg.graph_store_url}{sep}graph={urllib.parse.quote(self.named_graph)}"
+
     def push_meeting(self, rec: dict, summary: dict, prev_ids=None) -> None:
-        """Replace this meeting's named graph with freshly-built RDF."""
-        graph_iri = kg.meeting_iri(rec.get("id"))
-        if self.cfg.graph_store_url:
-            # Graph Store Protocol: PUT replaces the whole named graph.
-            body = kg.serialize_meeting(rec, summary, prev_ids, fmt="turtle")
-            sep = "&" if "?" in self.cfg.graph_store_url else "?"
-            url = f"{self.cfg.graph_store_url}{sep}graph={urllib.parse.quote(graph_iri)}"
-            self._request(url, body, "text/turtle", "PUT")
-        elif self.cfg.update_url:
-            triples = kg.serialize_meeting(rec, summary, prev_ids, fmt="nt").decode("utf-8")
+        """Upsert one meeting into the single 'meetgraph' named graph.
+
+        With a SPARQL Update endpoint (preferred) we delete just this meeting's
+        triples and re-insert them, so re-syncing is clean. With only a Graph
+        Store endpoint we POST (merge) the triples — additive, so use
+        ``replace_all`` for a full clean re-sync.
+        """
+        ng = self.named_graph
+        meeting_iri = kg.meeting_iri(rec.get("id"))
+        triples = kg.serialize_meeting(rec, summary, prev_ids, fmt="nt").decode("utf-8")
+        if self.cfg.update_url:
             update = (
-                f"DROP SILENT GRAPH <{graph_iri}> ;\n"
-                f"INSERT DATA {{ GRAPH <{graph_iri}> {{\n{triples}\n}} }}"
+                # Drop this meeting + all its sub-resources (topic/term/… IRIs)
+                f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                f'FILTER(?s = <{meeting_iri}> || STRSTARTS(STR(?s), "{meeting_iri}/")) }} }} ;\n'
+                f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}"
             )
+            self._request(self.cfg.update_url, update.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            self._request(self._gsp_url(), triples.encode("utf-8"),
+                          "application/n-triples", "POST")  # merge into the graph
+        else:
+            raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
+
+    def clear_graph(self) -> None:
+        """Empty the 'meetgraph' named graph (used before a full re-sync)."""
+        ng = self.named_graph
+        if self.cfg.update_url:
+            self._request(self.cfg.update_url, f"CLEAR SILENT GRAPH <{ng}>".encode(),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            try:
+                self._request(self._gsp_url(), None, None, "DELETE")
+            except Exception:
+                pass  # 404 if the graph doesn't exist yet — fine
+
+    def replace_all(self, records: list[dict]) -> None:
+        """Replace the whole 'meetgraph' graph with the full corpus (clean re-sync)."""
+        ng = self.named_graph
+        body = kg.serialize_corpus(records, fmt="turtle")
+        if self.cfg.graph_store_url:
+            self._request(self._gsp_url(), body, "text/turtle", "PUT")  # PUT replaces graph
+        elif self.cfg.update_url:
+            triples = kg.serialize_corpus(records, fmt="nt").decode("utf-8")
+            update = (f"CLEAR SILENT GRAPH <{ng}> ;\n"
+                      f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}")
             self._request(self.cfg.update_url, update.encode("utf-8"),
                           "application/sparql-update", "POST")
         else:

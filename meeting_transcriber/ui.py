@@ -713,6 +713,11 @@ class MainWindow(QWidget):
         self.ext_graph_query = QLineEdit()
         self.ext_graph_query.setPlaceholderText("http://localhost:7878/query   (used to test the connection)")
         g_form.addRow("Query URL", self.ext_graph_query)
+        from .kg import MEETGRAPH_NG
+        self.ext_graph_name = QLineEdit(MEETGRAPH_NG)
+        self.ext_graph_name.setPlaceholderText(MEETGRAPH_NG)
+        self.ext_graph_name.setToolTip("All meetings are stored in this single named graph (the 'meetgraph' graph).")
+        g_form.addRow("Named graph", self.ext_graph_name)
         self.ext_graph_user = QLineEdit()
         self.ext_graph_user.setPlaceholderText("optional")
         g_form.addRow("Username", self.ext_graph_user)
@@ -1057,8 +1062,8 @@ class MainWindow(QWidget):
         for w in (self.ext_rel_enable, self.ext_graph_enable):
             w.toggled.connect(self._persist_external)
         for w in (self.ext_rel_url, self.ext_rel_user, self.ext_rel_pass,
-                  self.ext_graph_store, self.ext_graph_update,
-                  self.ext_graph_query, self.ext_graph_user, self.ext_graph_pass):
+                  self.ext_graph_store, self.ext_graph_update, self.ext_graph_query,
+                  self.ext_graph_name, self.ext_graph_user, self.ext_graph_pass):
             w.textChanged.connect(self._persist_external)
 
     def _persist_external(self) -> None:
@@ -1073,6 +1078,7 @@ class MainWindow(QWidget):
         s("ext.graph.graph_store_url", self.ext_graph_store.text().strip())
         s("ext.graph.update_url", self.ext_graph_update.text().strip())
         s("ext.graph.query_url", self.ext_graph_query.text().strip())
+        s("ext.graph.named_graph", self.ext_graph_name.text().strip())
         s("ext.graph.user", self.ext_graph_user.text().strip())
         s("ext.graph.password", self.ext_graph_pass.text())
 
@@ -1090,6 +1096,8 @@ class MainWindow(QWidget):
             self.ext_graph_store.setText(g("ext.graph.graph_store_url") or "")
             self.ext_graph_update.setText(g("ext.graph.update_url") or "")
             self.ext_graph_query.setText(g("ext.graph.query_url") or "")
+            from .kg import MEETGRAPH_NG
+            self.ext_graph_name.setText(g("ext.graph.named_graph") or MEETGRAPH_NG)
             self.ext_graph_user.setText(g("ext.graph.user") or "")
             self.ext_graph_pass.setText(g("ext.graph.password") or "")
         finally:
@@ -1110,6 +1118,7 @@ class MainWindow(QWidget):
                 query_url=self.ext_graph_query.text().strip(),
                 graph_store_url=self.ext_graph_store.text().strip(),
                 update_url=self.ext_graph_update.text().strip(),
+                named_graph=self.ext_graph_name.text().strip(),
                 user=self.ext_graph_user.text().strip(),
                 password=self.ext_graph_pass.text(),
             ),
@@ -1197,19 +1206,24 @@ class MainWindow(QWidget):
 
         def work():
             recs = [r for r in (self.store.get_meeting(i) for i in ids) if r]
-            prev_by_user: dict = {}
-            ok = 0
+            recs.sort(key=lambda r: r["id"])
             errs: list[str] = []
-            for rec in sorted(recs, key=lambda r: r["id"]):
-                prev = prev_by_user.get(rec.get("user"))
-                res = external.push_meeting(rec, cfg, [prev] if prev else None)
-                prev_by_user[rec.get("user")] = rec["id"]
-                for k, v in res.items():
-                    if v == "ok":
-                        ok += 1
-                    else:
-                        errs.append(f"#{rec['id']} {k}: {v}")
-            msg = f"Synced {ok} target-write(s) across {len(recs)} meeting(s)."
+            # Relational: upsert each meeting (idempotent).
+            if cfg.relational.enabled and cfg.relational.url:
+                rs = external.RelationalSink(
+                    cfg.relational.url, cfg.relational.user, cfg.relational.password)
+                for rec in recs:
+                    try:
+                        rs.upsert(rec)
+                    except Exception as exc:
+                        errs.append(f"#{rec['id']} relational: {exc}")
+            # Graph: rebuild the whole 'meetgraph' named graph in one clean pass.
+            if cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
+                try:
+                    external.GraphSink(cfg.graph).replace_all(recs)
+                except Exception as exc:
+                    errs.append(f"graph: {exc}")
+            msg = f"Synced {len(recs)} meeting(s) to external database(s)."
             if errs:
                 msg += f"  {len(errs)} error(s): " + " | ".join(errs[:3])
             return msg
