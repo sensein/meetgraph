@@ -153,19 +153,24 @@ class LocalWhisperTranscriber(Transcriber):
 
 
 class OpenAITranscriber(Transcriber):
-    """Hosted transcription via the OpenAI audio API."""
+    """Hosted transcription via the OpenAI audio API or any OpenAI-compatible
+    endpoint (e.g. Groq, a self-hosted Whisper server) when ``base_url`` is set."""
 
     def __init__(
         self,
         api_key: str,
         model: str = "whisper-1",
         language: str | None = None,
+        base_url: str | None = None,
     ):
         from openai import OpenAI  # lazy import
 
         if not api_key:
-            raise ValueError("An OpenAI API key is required for the cloud engine.")
-        self.client = OpenAI(api_key=api_key)
+            raise ValueError("An API key is required for the cloud transcription engine.")
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = OpenAI(**kwargs)
         self.model = model
         self.language = language or None
 
@@ -202,5 +207,12 @@ def make_transcriber(config: dict) -> Transcriber:
             api_key=config.get("api_key", ""),
             model=config.get("openai_model", "whisper-1"),
             language=language,
+        )
+    if engine == "compatible":
+        return OpenAITranscriber(
+            api_key=config.get("api_key", "") or "not-needed",
+            model=config.get("openai_model", "whisper-large-v3"),
+            language=language,
+            base_url=config.get("base_url") or None,
         )
     raise ValueError(f"Unknown engine: {engine!r}")

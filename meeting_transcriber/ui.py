@@ -422,8 +422,14 @@ class MainWindow(QWidget):
         return page
 
     def _on_tab_changed(self, index: int) -> None:
-        if self.tabs.tabText(index).strip().endswith("Summary"):
+        text = self.tabs.tabText(index).strip()
+        if text.endswith("Summary"):
             self._refresh_meetings()
+        # Leaving Configuration → warm up the configured models so there's no
+        # cold-start download when the user hits Start.
+        if getattr(self, "_prev_tab_text", "").endswith("Configuration") and not text.endswith("Configuration"):
+            self._maybe_prewarm()
+        self._prev_tab_text = text
 
     # ----- meetings table (Summary tab) -----
     def _refresh_meetings(self) -> None:
@@ -528,8 +534,9 @@ class MainWindow(QWidget):
         row = QHBoxLayout()
         row.addWidget(QLabel("Engine:"))
         self.engine_combo = QComboBox()
-        self.engine_combo.addItem("Local (faster-whisper)", "local")
-        self.engine_combo.addItem("OpenAI API (cloud)", "openai")
+        self.engine_combo.addItem("Local — Whisper (faster-whisper / Apple MLX)", "local")
+        self.engine_combo.addItem("OpenAI (Whisper / GPT-4o transcribe)", "openai")
+        self.engine_combo.addItem("OpenAI-compatible — Groq, local server, custom…", "compatible")
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         row.addWidget(self.engine_combo)
         row.addWidget(QLabel("Language:"))
@@ -584,7 +591,39 @@ class MainWindow(QWidget):
         openai_l.addWidget(self.openai_model_combo)
         self.engine_stack.addWidget(openai_w)
 
+        # OpenAI-compatible (Groq, self-hosted Whisper, etc.)
+        compat_w = QWidget()
+        compat_l = QHBoxLayout(compat_w)
+        compat_l.setContentsMargins(0, 0, 0, 0)
+        compat_l.addWidget(QLabel("Base URL:"))
+        self.compat_base = QLineEdit()
+        self.compat_base.setPlaceholderText("https://api.groq.com/openai/v1")
+        compat_l.addWidget(self.compat_base, 1)
+        compat_l.addWidget(QLabel("Key:"))
+        self.compat_key = QLineEdit()
+        self.compat_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.compat_key.setPlaceholderText("API key (blank for local servers)")
+        compat_l.addWidget(self.compat_key, 1)
+        compat_l.addWidget(QLabel("Model:"))
+        self.compat_model = QComboBox()
+        self.compat_model.setEditable(True)
+        self.compat_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.compat_model.addItems(["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"])
+        self.compat_model.setMinimumWidth(200)
+        compat_l.addWidget(self.compat_model, 1)
+        self.engine_stack.addWidget(compat_w)
+
         engine_layout.addWidget(self.engine_stack)
+
+        engine_hint = QLabel(
+            "Transcription needs a speech-to-text model. Claude/Anthropic and OpenRouter "
+            "don't offer audio transcription — use Local Whisper, OpenAI, or any "
+            "OpenAI-compatible audio endpoint (e.g. Groq) above. Your Claude/OpenRouter "
+            "choice in “AI notes provider” is still used to write the notes."
+        )
+        engine_hint.setWordWrap(True)
+        engine_hint.setStyleSheet("color:#64748b; font-size:11px;")
+        engine_layout.addWidget(engine_hint)
 
         # HuggingFace token — optional; only used to download local Whisper models
         # faster / past anonymous rate limits.
@@ -972,6 +1011,9 @@ class MainWindow(QWidget):
         self.model_combo.currentTextChanged.connect(self._persist_config)
         self.api_key_edit.textChanged.connect(self._persist_config)
         self.openai_model_combo.currentTextChanged.connect(self._persist_config)
+        self.compat_base.textChanged.connect(self._persist_config)
+        self.compat_key.textChanged.connect(self._persist_config)
+        self.compat_model.currentTextChanged.connect(self._persist_config)
         self.mic_combo.currentIndexChanged.connect(self._persist_config)
         self.sys_combo.currentIndexChanged.connect(self._persist_config)
         self.hf_token_edit.textChanged.connect(self._persist_config)
@@ -1005,6 +1047,9 @@ class MainWindow(QWidget):
         s("t.local_model", self.model_combo.currentText())
         s("t.openai_key", self.api_key_edit.text())
         s("t.openai_model", self.openai_model_combo.currentText())
+        s("t.compat_base", self.compat_base.text())
+        s("t.compat_key", self.compat_key.text())
+        s("t.compat_model", self.compat_model.currentText())
         s("t.mic_device", self.mic_combo.currentText())
         s("t.sys_device", self.sys_combo.currentText())
         s("t.hf_token", self.hf_token_edit.text())
@@ -1036,6 +1081,15 @@ class MainWindow(QWidget):
         om = g("t.openai_model")
         if om:
             self.openai_model_combo.setCurrentText(om)
+        cb = g("t.compat_base")
+        if cb is not None:
+            self.compat_base.setText(cb)
+        ck = g("t.compat_key")
+        if ck is not None:
+            self.compat_key.setText(ck)
+        cm = g("t.compat_model")
+        if cm:
+            self.compat_model.setCurrentText(cm)
         an = g("ui.auto_notes")
         if an is not None:
             self.auto_notes.setChecked(an == "1")
@@ -1230,6 +1284,40 @@ class MainWindow(QWidget):
 
         self._run_async(work, lambda msg, ok: self.ext_sync_status.setText(msg))
 
+    # ----- model prewarming (avoid cold start) -----
+    def _maybe_prewarm(self) -> None:
+        if self.controller.running:
+            return
+        engine = self.engine_combo.currentData()
+        transcribe_config = None
+        if engine == "local":
+            sel = self.compute_combo.currentData() or "auto"
+            transcribe_config = {
+                "engine": "local",
+                "language": self.lang_edit.text().strip(),
+                "model_size": self.model_combo.currentText().strip(),
+                "device": sel,
+                "compute_type": {"cpu": "int8", "cuda": "float16"}.get(sel, "auto"),
+            }
+        # Pull the Ollama notes model only when pointed at a local Ollama server.
+        pull_model = None
+        if self.ai_provider.currentData() == "opensource":
+            base = self.ai_base.text().strip()
+            if (not base) or ("11434" in base) or ("localhost" in base) or ("127.0.0.1" in base):
+                pull_model = self.ai_model.currentText().strip() or None
+
+        sig = (str(transcribe_config), pull_model)
+        if sig == getattr(self, "_prewarm_sig", None):
+            return  # already warmed for this exact configuration
+        if not transcribe_config and not pull_model:
+            return
+        self._prewarm_sig = sig
+        worker = PrewarmWorker(transcribe_config, pull_model)
+        worker.progress.connect(self.status_label.setText)
+        worker.done.connect(lambda ok, msg: msg and self.status_label.setText(msg))
+        self._prewarm_worker = worker  # keep a reference
+        threading.Thread(target=worker.run, daemon=True).start()
+
     # ----- live meeting summary -----
     def _notes_ready(self) -> bool:
         if not self.transcript.entries:
@@ -1351,8 +1439,9 @@ class MainWindow(QWidget):
 
         sel = self.compute_combo.currentData() or "auto"
         compute_type = {"cpu": "int8", "cuda": "float16"}.get(sel, "auto")
+        engine = self.engine_combo.currentData()
         config = {
-            "engine": self.engine_combo.currentData(),
+            "engine": engine,
             "language": self.lang_edit.text().strip(),
             "model_size": self.model_combo.currentText().strip(),
             "device": sel,            # auto | cpu | cuda | mlx (resolved in make_transcriber)
@@ -1360,7 +1449,14 @@ class MainWindow(QWidget):
             "api_key": self.api_key_edit.text().strip(),
             "openai_model": self.openai_model_combo.currentText(),
         }
-        if config["engine"] == "openai" and not config["api_key"]:
+        if engine == "compatible":
+            config["api_key"] = self.compat_key.text().strip()
+            config["base_url"] = self.compat_base.text().strip()
+            config["openai_model"] = self.compat_model.currentText().strip()
+            if not config["base_url"]:
+                QMessageBox.warning(self, "Missing URL", "Enter the OpenAI-compatible base URL.")
+                return
+        if engine == "openai" and not config["api_key"]:
             QMessageBox.warning(self, "Missing key", "Enter your OpenAI API key.")
             return
 
@@ -1433,7 +1529,8 @@ class MainWindow(QWidget):
     def _set_settings_enabled(self, enabled: bool) -> None:
         for w in (
             self.engine_combo, self.model_combo, self.api_key_edit,
-            self.openai_model_combo, self.lang_edit, self.mic_check,
+            self.openai_model_combo, self.compat_base, self.compat_key,
+            self.compat_model, self.lang_edit, self.mic_check,
             self.sys_check, self.mic_combo, self.sys_combo,
         ):
             w.setEnabled(enabled)
@@ -1554,6 +1651,59 @@ class PullWorker(QObject):
             self.done.emit(False, "ollama not found — install Ollama (ollama.com)")
         except Exception as exc:
             self.done.emit(False, str(exc))
+
+
+class PrewarmWorker(QObject):
+    """Pre-downloads/loads the configured models so Start has no cold-start wait.
+
+    Warms the local transcription model (a short silent decode forces the model
+    files to download into the cache) and, for the open-source notes provider,
+    pulls the Ollama model.
+    """
+
+    progress = pyqtSignal(str)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, transcribe_config: dict | None, pull_model: str | None):
+        super().__init__()
+        self.transcribe_config = transcribe_config
+        self.pull_model = pull_model
+
+    def run(self) -> None:
+        ready = []
+        try:
+            if self.transcribe_config:
+                self.progress.emit("Preparing transcription model… (first run downloads it)")
+                from .transcribe import make_transcriber
+                import numpy as np
+
+                t = make_transcriber(self.transcribe_config)
+                try:
+                    t.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5s silence → forces load
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        t.close()
+                    except Exception:
+                        pass
+                ready.append("transcription model")
+            if self.pull_model:
+                import subprocess
+
+                self.progress.emit(f"Downloading notes model {self.pull_model}…")
+                try:
+                    proc = subprocess.run(
+                        ["ollama", "pull", self.pull_model],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    )
+                    if proc.returncode == 0:
+                        ready.append(self.pull_model)
+                except FileNotFoundError:
+                    pass  # ollama not installed — silently skip
+            self.done.emit(True, ("Models ready: " + ", ".join(ready)) if ready else "")
+        except Exception as exc:
+            self.done.emit(False, f"Model prep: {exc}")
 
 
 class _AsyncOp(QObject):
