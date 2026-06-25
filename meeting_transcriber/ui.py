@@ -52,7 +52,7 @@ QWidget { background: #eef1f6; color: #1f2733; font-size: 13px; }
 /* Soft gradient app background (shows through transparent tabs/pages) */
 #Root {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #eef2fb, stop:0.55 #e9edf6, stop:1 #e8f1ef);
+        stop:0 #d7e6fb, stop:0.5 #e6ecf7, stop:1 #d6efe9);
 }
 QTabWidget { background: transparent; }
 QTabWidget::pane { border: none; background: transparent; top: 4px; }
@@ -204,7 +204,8 @@ class MainWindow(QWidget):
         self.devices = list_input_devices()
         self.store = Store()
         self.identity = identity
-        self.user = identity.username or identity.sub if identity else "local"
+        self.user = (identity.username or identity.sub) if identity else "local"
+        self.speaker_self = identity.display if identity else "You"
         self._started_at = None
         self._meeting_id = None
         self._last_summary_md = ""
@@ -404,7 +405,7 @@ class MainWindow(QWidget):
         src_layout = QVBoxLayout(src_box)
 
         mic_row = QHBoxLayout()
-        self.mic_check = QCheckBox("Microphone (you)")
+        self.mic_check = QCheckBox(f"Microphone ({self.speaker_self})")
         self.mic_check.setChecked(True)
         mic_row.addWidget(self.mic_check)
         self.mic_combo = QComboBox()
@@ -714,7 +715,7 @@ class MainWindow(QWidget):
         if self.mic_check.isChecked():
             dev = self._device_by_index(self.mic_combo.currentData())
             if dev:
-                sources.append((dev, "You"))
+                sources.append((dev, self.speaker_self))
         if self.sys_check.isChecked():
             dev = self._device_by_index(self.sys_combo.currentData())
             if dev:
@@ -782,7 +783,10 @@ class MainWindow(QWidget):
 
     def _on_new_text(self, speaker: str, ts: datetime, text: str) -> None:
         self.transcript.add(speaker, text, when=ts)
-        color = SPEAKER_COLORS.get(speaker, "#475569")
+        if speaker == self.speaker_self:
+            color = SPEAKER_COLORS["You"]  # the local user keeps the blue chip
+        else:
+            color = SPEAKER_COLORS.get(speaker, SPEAKER_COLORS["Meeting"])
         chip = (
             f'<span style="background:{color}1a; color:{color};'
             f' font-weight:700; padding:1px 6px; border-radius:4px;">{speaker}</span>'
@@ -994,10 +998,22 @@ class GlobusLoginDialog(QDialog):
             logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(logo)
 
-        title = QLabel("Sign in to MeetGraph with Globus")
+        title = QLabel("Welcome to MeetGraph")
         title.setObjectName("HeaderTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(title)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Your name:"))
+        self.name_edit = QLineEdit(os.environ.get("MEETGRAPH_USER", ""))
+        self.name_edit.setPlaceholderText("used to label your speech (e.g. Tek Raj)")
+        name_row.addWidget(self.name_edit, 1)
+        v.addLayout(name_row)
+
+        sep = QLabel("Optionally sign in with Globus, or just continue with your name:")
+        sep.setStyleSheet("color:#64748b; font-size:12px;")
+        sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(sep)
 
         cid_row = QHBoxLayout()
         cid_row.addWidget(QLabel("Globus Client ID:"))
@@ -1028,7 +1044,8 @@ class GlobusLoginDialog(QDialog):
         self.complete_btn.clicked.connect(self._complete)
         btns.addWidget(self.complete_btn)
         btns.addStretch()
-        skip = QPushButton("Continue without signing in")
+        skip = QPushButton("Continue →")
+        skip.setObjectName("primary")
         skip.clicked.connect(self._skip)
         btns.addWidget(skip)
         v.addLayout(btns)
@@ -1061,7 +1078,12 @@ class GlobusLoginDialog(QDialog):
         self.accept()
 
     def _skip(self) -> None:
-        self.identity = None
+        name = self.name_edit.text().strip()
+        if name:
+            from .auth import Identity
+            self.identity = Identity(username=name, name=name, email="", sub=f"local:{name}")
+        else:
+            self.identity = None
         self.accept()
 
 
