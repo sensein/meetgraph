@@ -374,6 +374,12 @@ class MainWindow(QWidget):
         refresh = QPushButton("↻ Refresh")
         refresh.clicked.connect(self._refresh_meetings)
         srow.addWidget(refresh)
+        graph_btn = QPushButton("⬡ Export graph")
+        graph_btn.setToolTip("Export all meetings as one connected knowledge graph "
+                             "(JSON-LD / Turtle) — key terms linked to Wikipedia/Wikidata, "
+                             "meetings chained to their predecessors.")
+        graph_btn.clicked.connect(self._export_graph)
+        srow.addWidget(graph_btn)
         v.addLayout(srow)
 
         self.meetings_table = QTableWidget(0, 4)
@@ -447,6 +453,44 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Not found", "Meeting not found.")
             return
         MeetingDetailDialog(self, rec).exec()
+
+    def _export_graph(self) -> None:
+        """Export every meeting as one connected RDF knowledge graph."""
+        from . import kg
+
+        try:
+            metas = self.store.list_meetings(user=self.user or None, limit=5000)
+            records = [r for r in (self.store.get_meeting(m.id) for m in metas) if r]
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not read meetings: {exc}")
+            return
+        if not records:
+            QMessageBox.information(self, "Nothing to export", "No meetings recorded yet.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export knowledge graph",
+            f"meetgraph-knowledge-graph-{datetime.now():%Y%m%d}.jsonld",
+            "JSON-LD (*.jsonld);;Turtle (*.ttl);;N-Quads (*.nq)",
+        )
+        if not path:
+            return
+        if path.endswith(".ttl"):
+            fmt = "turtle"
+        elif path.endswith(".nq"):
+            fmt = "nquads"
+        elif path.endswith((".jsonld", ".json")):
+            fmt = "jsonld"
+        else:
+            fmt = {"Turtle (*.ttl)": "turtle", "N-Quads (*.nq)": "nquads"}.get(selected, "jsonld")
+            path += kg.EXTENSIONS[fmt]
+        try:
+            data = kg.serialize_corpus(records, fmt=fmt)
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not build graph: {exc}")
+            return
+        reveal_in_file_manager(path)
 
     def _build_config_tab(self) -> QWidget:
         page = QWidget()
@@ -1243,7 +1287,7 @@ class NotesWorker(QObject):
 
     def run(self) -> None:
         try:
-            from .agent import MeetingNotesAgent, summary_to_markdown
+            from .agent import MeetingNotesAgent, link_key_terms, summary_to_markdown
 
             agent = MeetingNotesAgent(
                 provider=self.config["provider"],
@@ -1252,6 +1296,7 @@ class NotesWorker(QObject):
                 base_url=self.config.get("base_url") or None,
             )
             summary = agent.summarize(self.transcript_text, title=self.title)
+            link_key_terms(summary)  # resolve key terms -> Wikipedia / Wikidata (best-effort)
             self.done.emit(
                 summary_to_markdown(summary, title=self.title),
                 summary.model_dump_json(indent=2),
@@ -1390,6 +1435,11 @@ class MeetingDetailDialog(QDialog):
         exp.setObjectName("primary")
         exp.clicked.connect(self._export)
         row.addWidget(exp)
+        rdf = QPushButton("Export RDF…")
+        rdf.setToolTip("Export this meeting as a knowledge graph (JSON-LD / Turtle), "
+                       "with key terms linked to Wikipedia/Wikidata and links to previous meetings.")
+        rdf.clicked.connect(self._export_rdf)
+        row.addWidget(rdf)
         share = QPushButton("Share…")
         share.clicked.connect(self._share)
         row.addWidget(share)
@@ -1435,6 +1485,49 @@ class MeetingDetailDialog(QDialog):
             with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
                 f.write(self._json)
         return path
+
+    def _prev_ids(self) -> list:
+        """The immediately-preceding meeting of the same user (a series chain)."""
+        try:
+            ms = self._parent.store.list_meetings(user=self._rec.get("user"), limit=1000)
+            earlier = [m.id for m in ms if self._mid and m.id < self._mid]
+            return [max(earlier)] if earlier else []
+        except Exception:
+            return []
+
+    def _export_rdf(self) -> None:
+        import json as _json
+
+        from . import kg
+
+        try:
+            summary = _json.loads(self._json) if self._json else {}
+        except Exception:
+            summary = {}
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export RDF (knowledge graph)",
+            f"meetgraph-{datetime.now():%Y%m%d-%H%M}.jsonld",
+            "JSON-LD (*.jsonld);;Turtle (*.ttl);;N-Quads (*.nq)",
+        )
+        if not path:
+            return
+        if path.endswith(".ttl"):
+            fmt = "turtle"
+        elif path.endswith(".nq"):
+            fmt = "nquads"
+        elif path.endswith((".jsonld", ".json")):
+            fmt = "jsonld"
+        else:
+            fmt = {"Turtle (*.ttl)": "turtle", "N-Quads (*.nq)": "nquads"}.get(selected, "jsonld")
+            path += kg.EXTENSIONS[fmt]
+        try:
+            data = kg.serialize_meeting(self._rec, summary, prev_ids=self._prev_ids(), fmt=fmt)
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not export RDF: {exc}")
+            return
+        reveal_in_file_manager(path)
 
     def _share(self) -> None:
         path = self._export()

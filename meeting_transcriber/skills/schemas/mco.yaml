@@ -1,0 +1,403 @@
+id: https://tekrajchhetri.com/mco
+name: meeting-content-ontology
+title: Meeting Content Ontology (MCO)
+description: >-
+  A small LinkML schema for the content of meeting notes: a meeting with its
+  participants, the topics discussed (each carrying key points and, where known,
+  an attribution), the decisions reached, the action items agreed, the questions
+  left open, and the salient key terms mentioned. An optional transcript records
+  the source the notes were taken from.
+
+  Key terms are linked out to external knowledge bases — a `KeyTerm` carries a
+  Wikipedia article (`rdfs:seeAlso`) and the corresponding Wikidata entity
+  (`owl:sameAs`), so a reader can jump straight to background on any concept the
+  meeting touched. Meetings in a series connect through `previous_meeting`
+  (`prov:wasInformedBy`): each set of notes points back to the meeting(s) it
+  follows, so the graph threads a recurring discussion together.
+
+  The model mirrors the shape of a meeting summary, not a scholarly artifact —
+  there are no claims, evidence, citations, or licensing. People appear only as
+  a minimal `Agent` so a point can be attributed or an action item assigned.
+
+  Nothing is mandatory. Meeting notes are routinely partial: participants may be
+  unknown or incomplete, an action item's owner may be just a label or missing,
+  and any section may be absent. Every field is therefore optional, and `Agent`
+  may be only an identifier with no name.
+
+  Established vocabularies are reused throughout, via LinkML `*_mappings` (which
+  `gen-owl` emits as SKOS matches). Where reuse is exact, `slot_uri` is also set
+  so instance data uses the canonical predicate. The bundled `align_owl.py`
+  promotes those mappings to real OWL axioms (`owl:equivalentClass` /
+  `owl:equivalentProperty` / `rdfs:subClassOf`), since `gen-owl` does not.
+license: MIT
+
+prefixes:
+  mco: https://tekrajchhetri.com/mco/
+  linkml: https://w3id.org/linkml/
+  rdfs: http://www.w3.org/2000/01/rdf-schema#
+  owl: http://www.w3.org/2002/07/owl#
+  xsd: http://www.w3.org/2001/XMLSchema#
+  prov: http://www.w3.org/ns/prov#
+  schema: http://schema.org/
+  dcterms: http://purl.org/dc/terms/
+  skos: http://www.w3.org/2004/02/skos/core#
+  foaf: http://xmlns.com/foaf/0.1/
+  ical: http://www.w3.org/2002/12/cal/ical#
+
+default_prefix: mco
+default_range: string
+
+imports:
+  - linkml:types
+
+# ---------------------------------------------------------------------------
+# Classes
+# ---------------------------------------------------------------------------
+classes:
+
+  NamedThing:
+    abstract: true
+    description: Structural base giving every thing an identifier and a label.
+    slots:
+      - id
+      - label
+
+  Meeting:
+    is_a: NamedThing
+    description: >-
+      A meeting, call, or interview and the notes recorded from it. Holds the
+      participants and the content discussed. All parts are optional.
+    broad_mappings:
+      - prov:Activity
+      - schema:Event
+    slots:
+      - title
+      - meeting_date
+      - purpose
+      - participant
+      - transcript
+      - has_topic
+      - has_decision
+      - has_action_item
+      - has_open_question
+      - has_key_term
+      - previous_meeting
+
+  Topic:
+    is_a: NamedThing
+    description: >-
+      A theme the discussion is organised around — a "key points by topic"
+      entry. Carries the points raised and, where known, the participant whose
+      view it reflects.
+    broad_mappings:
+      - skos:Concept
+    slots:
+      - pref_label
+      - point
+      - attribution
+      - key_term
+      - broader
+      - related
+
+  Decision:
+    is_a: NamedThing
+    description: >-
+      An outcome the group agreed or settled. No widely adopted decision
+      ontology exists, so this class is domain-specific. A decision may be
+      conditional ("only if X"), captured by `is_conditional` and `condition`.
+    slots:
+      - decision_text
+      - decision_status
+      - is_conditional
+      - condition
+      - about_topic
+
+  ActionItem:
+    is_a: NamedThing
+    description: >-
+      A follow-up task agreed in the meeting. `owner` may be a name, a bare
+      identifier (e.g. "R1"), or absent — it is never inferred.
+    close_mappings:
+      - schema:Action
+      - ical:Vtodo
+    slots:
+      - action_text
+      - owner
+      - due
+      - action_status
+      - about_topic
+
+  OpenQuestion:
+    is_a: NamedThing
+    description: A question raised but left unresolved or explicitly deferred.
+    close_mappings:
+      - schema:Question
+    slots:
+      - question_text
+      - deferred
+      - about_topic
+
+  KeyTerm:
+    is_a: NamedThing
+    description: >-
+      A salient concept, named entity, technology, method, or organisation the
+      meeting actually mentioned, linked out to external knowledge bases so a
+      reader can quickly look it up. `wikipedia` points to the article and
+      `wikidata` to the canonical entity; both are resolved automatically and
+      verified, never guessed.
+    broad_mappings:
+      - skos:Concept
+    close_mappings:
+      - schema:DefinedTerm
+    slots:
+      - pref_label
+      - gloss
+      - wikipedia
+      - wikidata
+
+  Transcript:
+    is_a: NamedThing
+    description: The text record the notes were taken from. Optional.
+    close_mappings:
+      - schema:CreativeWork
+    slots:
+      - in_language
+
+  Agent:
+    description: >-
+      A participant — modeled minimally, only so a point can be attributed or an
+      action item assigned. May be just an identifier with no name when the
+      person is unknown or anonymised.
+    broad_mappings:
+      - prov:Agent
+    close_mappings:
+      - foaf:Agent
+    narrow_mappings:
+      - schema:Person
+      - foaf:Person
+    slots:
+      - id
+      - name
+
+# ---------------------------------------------------------------------------
+# Slots  (all optional; exact reuse sets slot_uri + exact_mappings)
+# ---------------------------------------------------------------------------
+slots:
+
+  # --- identity / structural ---
+  id:
+    identifier: true
+    range: uriorcurie
+    description: Stable identifier.
+  label:
+    slot_uri: rdfs:label
+    exact_mappings: [rdfs:label]
+    description: Human-readable label.
+
+  # --- Meeting ---
+  title:
+    slot_uri: dcterms:title
+    exact_mappings: [dcterms:title]
+    description: Title of the meeting.
+  purpose:
+    slot_uri: dcterms:description
+    exact_mappings: [dcterms:description]
+    description: Purpose or context of the meeting.
+  meeting_date:
+    close_mappings: [prov:atTime, schema:startDate, dcterms:date]
+    range: datetime
+    description: When the meeting took place.
+  participant:
+    slot_uri: prov:wasAssociatedWith
+    exact_mappings: [prov:wasAssociatedWith]
+    close_mappings: [schema:attendee]
+    range: Agent
+    multivalued: true
+    inlined_as_list: true
+    description: Participants. May be incomplete or unknown.
+  transcript:
+    slot_uri: prov:used
+    exact_mappings: [prov:used]
+    range: Transcript
+    description: The transcript the notes were taken from.
+  previous_meeting:
+    slot_uri: prov:wasInformedBy
+    exact_mappings: [prov:wasInformedBy]
+    close_mappings: [dcterms:relation]
+    range: Meeting
+    multivalued: true
+    description: >-
+      Earlier meeting(s) in the same series that this one follows or continues.
+      A reference to other Meeting records (by id), not an embedded copy.
+  has_topic:
+    close_mappings: [dcterms:hasPart]
+    range: Topic
+    multivalued: true
+    inlined_as_list: true
+    description: Topics discussed.
+  has_decision:
+    close_mappings: [dcterms:hasPart]
+    range: Decision
+    multivalued: true
+    inlined_as_list: true
+    description: Decisions reached.
+  has_action_item:
+    close_mappings: [dcterms:hasPart]
+    range: ActionItem
+    multivalued: true
+    inlined_as_list: true
+    description: Action items agreed.
+  has_open_question:
+    close_mappings: [dcterms:hasPart]
+    range: OpenQuestion
+    multivalued: true
+    inlined_as_list: true
+    description: Questions left open.
+  has_key_term:
+    close_mappings: [dcterms:hasPart, schema:about]
+    range: KeyTerm
+    multivalued: true
+    inlined_as_list: true
+    description: Salient key terms mentioned in the meeting, linked to external sources.
+
+  # --- Topic ---
+  pref_label:
+    slot_uri: skos:prefLabel
+    exact_mappings: [skos:prefLabel]
+    description: The preferred label (topic or term name).
+  point:
+    close_mappings: [schema:text]
+    multivalued: true
+    description: A key point or statement raised under this topic (paraphrased).
+  attribution:
+    slot_uri: prov:wasAttributedTo
+    exact_mappings: [prov:wasAttributedTo]
+    close_mappings: [schema:author]
+    range: Agent
+    description: The participant whose view this topic primarily reflects, if known.
+  key_term:
+    slot_uri: dcterms:subject
+    exact_mappings: [dcterms:subject]
+    close_mappings: [schema:about]
+    range: KeyTerm
+    multivalued: true
+    description: Key term(s) this topic concerns.
+  broader:
+    slot_uri: skos:broader
+    exact_mappings: [skos:broader]
+    range: Topic
+    multivalued: true
+    description: A broader topic.
+  related:
+    slot_uri: skos:related
+    exact_mappings: [skos:related]
+    range: Topic
+    multivalued: true
+    description: A related topic.
+
+  # --- subject link (content -> topic) ---
+  about_topic:
+    slot_uri: dcterms:subject
+    exact_mappings: [dcterms:subject]
+    close_mappings: [schema:about]
+    range: Topic
+    multivalued: true
+    description: Topic(s) this item concerns.
+
+  # --- Decision ---
+  decision_text:
+    close_mappings: [schema:text]
+    description: Statement of what was decided.
+  decision_status:
+    range: DecisionStatus
+    description: Status of the decision.
+  is_conditional:
+    range: boolean
+    description: True if the decision holds only under a stated condition.
+  condition:
+    description: The condition under which a conditional decision applies.
+
+  # --- ActionItem ---
+  action_text:
+    close_mappings: [schema:text]
+    description: Statement of the task to be done.
+  owner:
+    slot_uri: schema:agent
+    exact_mappings: [schema:agent]
+    close_mappings: [prov:wasAssociatedWith]
+    range: Agent
+    description: Who is responsible. May be a label/identifier, or absent.
+  due:
+    slot_uri: ical:due
+    exact_mappings: [ical:due]
+    close_mappings: [schema:endTime]
+    range: datetime
+    description: Due date or deadline, if stated.
+  action_status:
+    range: ActionStatus
+    description: Status of the action item.
+
+  # --- OpenQuestion ---
+  question_text:
+    description: Statement of the open question.
+  deferred:
+    range: boolean
+    description: True if the question was explicitly deferred.
+
+  # --- KeyTerm ---
+  gloss:
+    slot_uri: dcterms:description
+    exact_mappings: [dcterms:description]
+    description: One-line description of the term, drawn from the discussion.
+  wikipedia:
+    slot_uri: rdfs:seeAlso
+    exact_mappings: [rdfs:seeAlso]
+    close_mappings: [foaf:isPrimaryTopicOf, schema:sameAs]
+    range: uri
+    description: Wikipedia article about the term (verified, never guessed).
+  wikidata:
+    slot_uri: owl:sameAs
+    exact_mappings: [owl:sameAs]
+    close_mappings: [skos:exactMatch, schema:sameAs]
+    range: uri
+    description: Wikidata entity URI for the term (verified, never guessed).
+
+  # --- Transcript / Agent ---
+  in_language:
+    slot_uri: dcterms:language
+    exact_mappings: [dcterms:language]
+    description: Language of the transcript.
+  name:
+    slot_uri: foaf:name
+    exact_mappings: [foaf:name]
+    close_mappings: [schema:name]
+    description: Name of the participant, if known.
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+enums:
+
+  DecisionStatus:
+    description: Lifecycle state of a decision.
+    permissible_values:
+      decided: { description: Agreed and in effect. }
+      deferred: { description: Parked for later. }
+      rejected: { description: Considered and declined. }
+      superseded: { description: Replaced by a later decision. }
+
+  ActionStatus:
+    description: Status of an action item, aligned to schema.org ActionStatusType.
+    permissible_values:
+      open:
+        description: Not yet started.
+        meaning: schema:PotentialActionStatus
+      in_progress:
+        description: Underway.
+        meaning: schema:ActiveActionStatus
+      completed:
+        description: Finished.
+        meaning: schema:CompletedActionStatus
+      cancelled:
+        description: Abandoned without completion.
+        meaning: schema:FailedActionStatus

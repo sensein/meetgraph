@@ -1,11 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://example.org/schemas/meeting-summary.schema.json",
+  "$id": "https://tekrajchhetri.com/schemas/meeting-summary.schema.json",
   "title": "MeetingSummary",
   "description": "Structured, faithful summary of a single meeting transcript.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["meeting", "topics", "decisions", "open_questions", "action_items"],
+  "required": ["meeting", "topics", "decisions", "open_questions", "action_items", "key_terms"],
   "properties": {
     "meeting": {
       "type": "object",
@@ -71,6 +71,33 @@
           "due": {
             "type": ["string", "null"],
             "description": "Stated deadline or trigger, else null."
+          }
+        }
+      }
+    },
+    "key_terms": {
+      "type": "array",
+      "description": "Salient terms worth looking up — named entities, technologies, methods, organisations actually mentioned.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["term"],
+        "properties": {
+          "term": {
+            "type": "string",
+            "description": "Canonical name of the term (e.g. 'Kubernetes', not 'k8s')."
+          },
+          "description": {
+            "type": ["string", "null"],
+            "description": "One-line gloss from the discussion, if helpful; else null."
+          },
+          "wikipedia": {
+            "type": ["string", "null"],
+            "description": "Resolved Wikipedia article URL. Filled automatically — leave null."
+          },
+          "wikidata": {
+            "type": ["string", "null"],
+            "description": "Resolved Wikidata entity URI. Filled automatically — leave null."
           }
         }
       }

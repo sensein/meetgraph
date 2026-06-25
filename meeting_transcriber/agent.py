@@ -49,12 +49,28 @@ class ActionItem(BaseModel):
     due: str | None = Field(None, description="Stated deadline or trigger, else null.")
 
 
+class KeyTerm(BaseModel):
+    term: str = Field(
+        description="A salient concept, named entity, technology, method, or organisation actually mentioned."
+    )
+    description: str | None = Field(
+        None, description="One-line gloss from the discussion, if helpful; else null."
+    )
+    # Filled automatically by link_key_terms() — the model must NOT populate these.
+    wikipedia: str | None = Field(None, description="Leave null; resolved automatically.")
+    wikidata: str | None = Field(None, description="Leave null; resolved automatically.")
+
+
 class MeetingSummary(BaseModel):
     meeting: MeetingInfo
     topics: list[Topic] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list, description="Things actually agreed/settled.")
     open_questions: list[str] = Field(default_factory=list, description="Explicitly deferred/unresolved.")
     action_items: list[ActionItem] = Field(default_factory=list)
+    key_terms: list[KeyTerm] = Field(
+        default_factory=list,
+        description="Salient terms worth looking up — named entities, technologies, methods, organisations.",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -79,7 +95,12 @@ quotes, not whole paragraphs.
 or open question rather than papering over it.
 7. Organize by topic, not by clock. Group related discussion even if scattered.
 8. A decision is something settled; an action item is something to be done (with an owner \
-only if stated). Empty categories are empty lists, not invented content."""
+only if stated). Empty categories are empty lists, not invented content.
+9. Surface key terms. List the salient terms the meeting actually mentioned and that a reader \
+might want to look up: named entities, technologies, tools, methods, standards, organisations, \
+domain concepts. Use the canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words and \
+anything not in the transcript. Leave the wikipedia/wikidata fields null — they are filled \
+automatically; never invent a URL."""
 
 
 # --------------------------------------------------------------------------- #
@@ -233,6 +254,33 @@ def clean_transcript_file(path: str) -> str:
     return mod.render(cues)
 
 
+def link_key_terms(summary: MeetingSummary) -> MeetingSummary:
+    """Resolve each key term to a verified Wikipedia article + Wikidata entity.
+
+    Mutates and returns ``summary``. Network failures leave terms unlinked.
+    Cheap to call repeatedly (auto-summary): look-ups are cached and only the
+    ``wikipedia`` field is refilled, so already-linked terms cost nothing.
+    """
+    if not summary.key_terms:
+        return summary
+    try:
+        from .wikipedia import resolve_terms
+    except Exception:
+        return summary
+    pending = [kt.term for kt in summary.key_terms if not kt.wikipedia]
+    if not pending:
+        return summary
+    links = resolve_terms(pending)
+    for kt in summary.key_terms:
+        link = links.get(kt.term)
+        if link:
+            kt.wikipedia = link.wikipedia
+            kt.wikidata = link.wikidata
+            if not kt.description and link.description:
+                kt.description = link.description
+    return summary
+
+
 def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> str:
     """Render a MeetingSummary as readable Markdown notes (skill mode A shape)."""
     m = summary.meeting
@@ -272,6 +320,14 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
             lines.append(f"- [ ] {a.item}{suffix}")
         lines.append("")
 
+    if summary.key_terms:
+        lines += ["## Key terms", ""]
+        for kt in summary.key_terms:
+            label = f"[{kt.term}]({kt.wikipedia})" if kt.wikipedia else kt.term
+            gloss = f" — {kt.description}" if kt.description else ""
+            lines.append(f"- {label}{gloss}")
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -300,6 +356,7 @@ def _main() -> int:
         base_url=args.base_url,
     )
     summary = agent.summarize(text, title=args.title)
+    link_key_terms(summary)
     if args.json:
         sys.stdout.write(summary.model_dump_json(indent=2) + "\n")
     else:

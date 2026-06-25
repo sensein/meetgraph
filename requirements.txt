@@ -18,4 +18,8 @@ openai>=1.30
 # Claude / OpenAI / OpenRouter / open-source OpenAI-compatible servers)
 pydantic-ai-slim[anthropic,openai]>=2.0
 
+# Knowledge-graph storage + RDF export (JSON-LD / Turtle / N-Quads, SPARQL)
+pyoxigraph>=0.4
+
 # Local storage uses the stdlib `sqlite3` — no extra dependency.
+# Key-term -> Wikipedia/Wikidata linking uses the stdlib `urllib` — no extra dependency.
