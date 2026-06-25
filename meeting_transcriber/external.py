@@ -36,6 +36,41 @@ class RelationalConfig:
     password: str = ""   # optional — password or access token
 
 
+# Triplestore types and how their SPARQL endpoints are laid out, so the user
+# only enters a base URL (+ repository/dataset name where applicable).
+GRAPH_DB_TYPES = [
+    ("oxigraph", "Oxigraph", False),
+    ("fuseki", "Apache Jena Fuseki", True),
+    ("graphdb", "GraphDB", True),
+    ("blazegraph", "Blazegraph", True),
+    ("rdf4j", "RDF4J Server", True),
+    ("custom", "Other / Custom", False),
+]
+# "needs_dataset" -> the third element above (repository / dataset / namespace).
+
+
+def derive_endpoints(db_type: str, base: str, dataset: str = "") -> dict:
+    """Return {'query','update','store'} endpoint URLs for a triplestore type."""
+    base = (base or "").rstrip("/")
+    ds = (dataset or "").strip().strip("/")
+    if not base:
+        return {"query": "", "update": "", "store": ""}
+    if db_type == "oxigraph":
+        return {"query": f"{base}/query", "update": f"{base}/update", "store": f"{base}/store"}
+    if db_type == "fuseki":
+        d = ds or "ds"
+        return {"query": f"{base}/{d}/sparql", "update": f"{base}/{d}/update", "store": f"{base}/{d}/data"}
+    if db_type in ("graphdb", "rdf4j"):
+        repo = ds or "repo"
+        r = f"{base}/repositories/{repo}"
+        return {"query": r, "update": f"{r}/statements", "store": f"{r}/rdf-graphs/service"}
+    if db_type == "blazegraph":
+        ns = ds or "kb"
+        ep = f"{base}/blazegraph/namespace/{ns}/sparql"
+        return {"query": ep, "update": ep, "store": ep}
+    return {"query": "", "update": "", "store": ""}  # custom -> manual
+
+
 @dataclass
 class GraphConfig:
     enabled: bool = False

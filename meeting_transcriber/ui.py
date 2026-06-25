@@ -757,6 +757,26 @@ class MainWindow(QWidget):
         outer.setSpacing(10)
         _HINT = "color:#64748b; font-size:11px;"
 
+        # --- Storage mode ---
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Store meetings:"))
+        self.storage_mode = QComboBox()
+        self.storage_mode.addItem("Local + Remote", "local_remote")
+        self.storage_mode.addItem("Remote only", "remote_only")
+        self.storage_mode.addItem("Local only", "local_only")
+        self.storage_mode.setToolTip(
+            "Local + Remote: keep on this machine and mirror to your database.\n"
+            "Remote only: after a successful sync, the local copy is removed (your DB is the system of record).\n"
+            "Local only: keep on this machine; never auto-sync to a database.")
+        mode_row.addWidget(self.storage_mode)
+        mode_row.addStretch()
+        outer.addLayout(mode_row)
+        mode_hint = QLabel("Choose where your meetings live, and share accordingly. "
+                           "“Remote only” needs a configured + enabled database below.")
+        mode_hint.setStyleSheet(_HINT)
+        mode_hint.setWordWrap(True)
+        outer.addWidget(mode_hint)
+
         # --- Relational ---
         self.ext_rel_enable = QCheckBox("Relational database (PostgreSQL / MySQL / SQLite via SQLAlchemy)")
         outer.addWidget(self.ext_rel_enable)
@@ -789,10 +809,28 @@ class MainWindow(QWidget):
         outer.addLayout(rel_form)
 
         # --- Graph ---
+        from .external import GRAPH_DB_TYPES
+
         self.ext_graph_enable = QCheckBox("Graph database / triplestore (SPARQL — Oxigraph, Fuseki, GraphDB…)")
         outer.addWidget(self.ext_graph_enable)
         g_form = QFormLayout()
         g_form.setContentsMargins(22, 0, 0, 0)
+        # Smart endpoint setup: pick a type + base URL, endpoints are derived.
+        type_row = QHBoxLayout()
+        self.ext_graph_type = QComboBox()
+        for key, label, _needs in GRAPH_DB_TYPES:
+            self.ext_graph_type.addItem(label, key)
+        self.ext_graph_type.currentIndexChanged.connect(self._fill_graph_endpoints)
+        type_row.addWidget(self.ext_graph_type)
+        self.ext_graph_base = QLineEdit()
+        self.ext_graph_base.setPlaceholderText("Base URL, e.g. http://localhost:7878")
+        self.ext_graph_base.editingFinished.connect(self._fill_graph_endpoints)
+        type_row.addWidget(self.ext_graph_base, 1)
+        g_form.addRow("DB type / base URL", self._wrap(type_row))
+        self.ext_graph_dataset = QLineEdit()
+        self.ext_graph_dataset.setPlaceholderText("repository / dataset / namespace (for Fuseki, GraphDB, …)")
+        self.ext_graph_dataset.editingFinished.connect(self._fill_graph_endpoints)
+        g_form.addRow("Repository / dataset", self.ext_graph_dataset)
         self.ext_graph_store = QLineEdit()
         self.ext_graph_store.setPlaceholderText("http://localhost:7878/store   (Graph Store endpoint — include the path, e.g. /store)")
         g_form.addRow("Graph Store URL", self.ext_graph_store)
@@ -1096,6 +1134,26 @@ class MainWindow(QWidget):
             self.team_status.setText(f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database.")
         else:
             self.team_status.setText("Not in a team. Generate a key to start one, or paste a key to join.")
+
+    def _fill_graph_endpoints(self) -> None:
+        """Derive query/update/store URLs from the chosen DB type + base URL."""
+        from .external import GRAPH_DB_TYPES, derive_endpoints
+
+        t = self.ext_graph_type.currentData()
+        needs = next((n for k, _l, n in GRAPH_DB_TYPES if k == t), False)
+        self.ext_graph_dataset.setEnabled(t == "custom" or needs)
+        manual = t == "custom"
+        # Derived endpoints are read-only for known types; freely editable for Custom.
+        for w in (self.ext_graph_store, self.ext_graph_update, self.ext_graph_query):
+            w.setReadOnly(not manual)
+        if manual:
+            return
+        eps = derive_endpoints(t, self.ext_graph_base.text().strip(), self.ext_graph_dataset.text().strip())
+        if eps["query"] or eps["update"]:
+            self.ext_graph_query.setText(eps["query"])
+            self.ext_graph_update.setText(eps["update"])
+            self.ext_graph_store.setText(eps["store"])
+            self._persist_external()
 
     @staticmethod
     def _wrap(layout) -> QWidget:
@@ -1441,8 +1499,11 @@ class MainWindow(QWidget):
             w.toggled.connect(self._persist_external)
         for w in (self.ext_rel_url, self.ext_rel_user, self.ext_rel_pass,
                   self.ext_graph_store, self.ext_graph_update, self.ext_graph_query,
-                  self.ext_graph_name, self.ext_graph_user, self.ext_graph_pass):
+                  self.ext_graph_name, self.ext_graph_user, self.ext_graph_pass,
+                  self.ext_graph_base, self.ext_graph_dataset):
             w.textChanged.connect(self._persist_external)
+        self.ext_graph_type.currentIndexChanged.connect(self._persist_external)
+        self.storage_mode.currentIndexChanged.connect(self._persist_external)
         for w in (self.email_host, self.email_port, self.email_user, self.email_pass,
                   self.email_from, self.email_recipients):
             w.textChanged.connect(self._persist_email)
@@ -1467,6 +1528,10 @@ class MainWindow(QWidget):
         s("ext.graph.update_url", self.ext_graph_update.text().strip())
         s("ext.graph.query_url", self.ext_graph_query.text().strip())
         s("ext.graph.named_graph", self.ext_graph_name.text().strip())
+        s("ext.graph.db_type", self.ext_graph_type.currentData() or "oxigraph")
+        s("ext.graph.base", self.ext_graph_base.text().strip())
+        s("ext.graph.dataset", self.ext_graph_dataset.text().strip())
+        s("storage.mode", self.storage_mode.currentData() or "local_remote")
         s("ext.graph.user", self.ext_graph_user.text().strip())
         s("ext.graph.password", self.ext_graph_pass.text())
 
@@ -1547,6 +1612,17 @@ class MainWindow(QWidget):
             self.ext_graph_query.setText(g("ext.graph.query_url") or "")
             from .kg import MEETGRAPH_NG
             self.ext_graph_name.setText(g("ext.graph.named_graph") or MEETGRAPH_NG)
+            dt = g("ext.graph.db_type") or "oxigraph"
+            di = self.ext_graph_type.findData(dt)
+            if di >= 0:
+                self.ext_graph_type.setCurrentIndex(di)
+            self.ext_graph_base.setText(g("ext.graph.base") or "")
+            self.ext_graph_dataset.setText(g("ext.graph.dataset") or "")
+            sm = g("storage.mode") or "local_remote"
+            si = self.storage_mode.findData(sm)
+            if si >= 0:
+                self.storage_mode.setCurrentIndex(si)
+            self._fill_graph_endpoints()  # set read-only state for the chosen type
             self.ext_graph_user.setText(g("ext.graph.user") or "")
             self.ext_graph_pass.setText(g("ext.graph.password") or "")
         finally:
@@ -1609,10 +1685,15 @@ class MainWindow(QWidget):
         except Exception:
             return None
 
+    def _storage_mode(self) -> str:
+        return self.storage_mode.currentData() or "local_remote"
+
     def _push_external_async(self, meeting_id) -> None:
         """Mirror one meeting to any enabled external DB, in the background."""
         if meeting_id is None:
             return
+        if self._storage_mode() == "local_only":
+            return  # user chose not to sync to a remote database
         cfg = self._current_external_cfg()
         if not (cfg.relational.enabled or cfg.graph.enabled):
             return
@@ -1932,6 +2013,7 @@ class MainWindow(QWidget):
             "base_url": self.ai_base.text().strip(),
         }
         name, email, team_id = self._display_name, self.user_email, self.team_id or None
+        mode = self._storage_mode()
 
         def work():
             import json as _json
@@ -1958,9 +2040,13 @@ class MainWindow(QWidget):
             links = [l.as_dict() for l in crosslink.cross_link(target, list(by_id.values()), provider_cfg)]
             self.store.set_links(meeting_id, links)
             rec["links"] = links
-            if cfg.relational.enabled or cfg.graph.enabled:
+            push_res = {}
+            if mode != "local_only" and (cfg.relational.enabled or cfg.graph.enabled):
                 prev = self._prev_meeting_id(meeting_id, rec.get("user"))
-                external.push_meeting(rec, cfg, [prev] if prev else None)
+                push_res = external.push_meeting(rec, cfg, [prev] if prev else None)
+                for k, v in push_res.items():
+                    if v == "ok":
+                        self.store.mark_sent(meeting_id, k)
             try:
                 entry = self.store.log_action("cross_linked", name, email, team_id, meeting_id,
                                               f"{len(links)} link(s)")
@@ -1968,9 +2054,21 @@ class MainWindow(QWidget):
                     external.push_audit(entry, cfg)
             except Exception:
                 pass
+            # Remote-only: once safely synced, the local copy is removed.
+            if mode == "remote_only" and push_res and all(v == "ok" for v in push_res.values()):
+                try:
+                    self.store.delete_meeting(meeting_id)
+                except Exception:
+                    pass
+                return "Synced to remote database; local copy removed (remote-only)."
             return f"Linked {len(links)} related meeting(s)." if links else "No related meetings found."
 
-        self._run_async(work, lambda msg, ok: msg and self._set_summary_status(msg))
+        def done(msg, ok):
+            if msg:
+                self._set_summary_status(msg)
+            self._refresh_meetings()  # reflects a remote-only purge
+
+        self._run_async(work, done)
 
     # ----- model prewarming (avoid cold start) -----
     def _maybe_prewarm(self) -> None:
