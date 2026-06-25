@@ -510,9 +510,8 @@ class MainWindow(QWidget):
         if not (cfg.enabled and cfg.url):
             return None, "Enable a relational shared database in Configuration to see team meetings."
         try:
-            from .external import RelationalSink
-            rows = RelationalSink(cfg.url, cfg.user, cfg.password).list_meetings(
-                team_id=self.team_id or None)
+            from .external import structured_sink
+            rows = structured_sink(cfg).list_meetings(team_id=self.team_id or None)
         except Exception as exc:
             return None, f"⚠ Shared DB: {exc}"
         if query:
@@ -528,8 +527,8 @@ class MainWindow(QWidget):
         if getattr(self, "_team_feed", False):
             cfg = self._current_external_cfg().relational
             try:
-                from .external import RelationalSink
-                rec = RelationalSink(cfg.url, cfg.user, cfg.password).get_meeting(mid)
+                from .external import structured_sink
+                rec = structured_sink(cfg).get_meeting(mid)
             except Exception as exc:
                 QMessageBox.warning(self, "Shared DB", f"Could not load meeting: {exc}")
                 return
@@ -824,14 +823,23 @@ class MainWindow(QWidget):
         mode_hint.setWordWrap(True)
         outer.addWidget(mode_hint)
 
-        # --- Relational ---
-        self.ext_rel_enable = QCheckBox("Relational database (PostgreSQL / MySQL / SQLite via SQLAlchemy)")
+        # --- Relational / document DB ---
+        self.ext_rel_enable = QCheckBox("Structured database (SQL: PostgreSQL/MySQL/SQLite — or MongoDB)")
         outer.addWidget(self.ext_rel_enable)
         rel_form = QFormLayout()
         rel_form.setContentsMargins(22, 0, 0, 0)
+        self.ext_rel_kind = QComboBox()
+        self.ext_rel_kind.addItem("SQL (SQLAlchemy)", "sql")
+        self.ext_rel_kind.addItem("MongoDB", "mongodb")
+        self.ext_rel_kind.currentIndexChanged.connect(self._on_rel_kind_changed)
+        rel_form.addRow("Database kind", self.ext_rel_kind)
         self.ext_rel_url = QLineEdit()
         self.ext_rel_url.setPlaceholderText("postgresql+psycopg://host:5432/dbname  (credentials optional below)")
         rel_form.addRow("Connection URL", self.ext_rel_url)
+        self.ext_rel_db = QLineEdit()
+        self.ext_rel_db.setPlaceholderText("MongoDB database name (default: meetgraph)")
+        self.ext_rel_db_row = self.ext_rel_db  # kept for show/hide
+        rel_form.addRow("Database name", self.ext_rel_db)
         self.ext_rel_user = QLineEdit()
         self.ext_rel_user.setPlaceholderText("optional — or embed in the URL")
         rel_form.addRow("Username", self.ext_rel_user)
@@ -839,9 +847,9 @@ class MainWindow(QWidget):
         self.ext_rel_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.ext_rel_pass.setPlaceholderText("optional — password or access token")
         rel_form.addRow("Password / token", self.ext_rel_pass)
-        rel_hint = QLabel("Needs SQLAlchemy + a driver (e.g. psycopg2-binary, pymysql). "
-                          "Writes a meetgraph_meetings table. Username/password here are "
-                          "merged into the URL if set.")
+        rel_hint = QLabel("SQL needs SQLAlchemy + a driver (psycopg2-binary, pymysql). MongoDB needs "
+                          "pymongo (works with free MongoDB Atlas: mongodb+srv://… — or a local server). "
+                          "Writes a meetgraph_meetings table / meetings collection.")
         rel_hint.setStyleSheet(_HINT)
         rel_hint.setWordWrap(True)
         rel_form.addRow("", rel_hint)
@@ -1544,11 +1552,12 @@ class MainWindow(QWidget):
     def _wire_external_persistence(self) -> None:
         for w in (self.ext_rel_enable, self.ext_graph_enable):
             w.toggled.connect(self._persist_external)
-        for w in (self.ext_rel_url, self.ext_rel_user, self.ext_rel_pass,
+        for w in (self.ext_rel_url, self.ext_rel_db, self.ext_rel_user, self.ext_rel_pass,
                   self.ext_graph_store, self.ext_graph_update, self.ext_graph_query,
                   self.ext_graph_name, self.ext_graph_user, self.ext_graph_pass,
                   self.ext_graph_base, self.ext_graph_dataset):
             w.textChanged.connect(self._persist_external)
+        self.ext_rel_kind.currentIndexChanged.connect(self._persist_external)
         self.ext_graph_type.currentIndexChanged.connect(self._persist_external)
         self.storage_mode.currentIndexChanged.connect(self._persist_external)
         for w in (self.email_host, self.email_port, self.email_user, self.email_pass,
@@ -1567,7 +1576,9 @@ class MainWindow(QWidget):
             return
         s = self.store.set_setting
         s("ext.rel.enabled", "1" if self.ext_rel_enable.isChecked() else "0")
+        s("ext.rel.kind", self.ext_rel_kind.currentData() or "sql")
         s("ext.rel.url", self.ext_rel_url.text().strip())
+        s("ext.rel.database", self.ext_rel_db.text().strip())
         s("ext.rel.user", self.ext_rel_user.text().strip())
         s("ext.rel.password", self.ext_rel_pass.text())
         s("ext.graph.enabled", "1" if self.ext_graph_enable.isChecked() else "0")
@@ -1650,9 +1661,14 @@ class MainWindow(QWidget):
         try:
             g = self.store.get_setting
             self.ext_rel_enable.setChecked(g("ext.rel.enabled") == "1")
+            ki = self.ext_rel_kind.findData(g("ext.rel.kind") or "sql")
+            if ki >= 0:
+                self.ext_rel_kind.setCurrentIndex(ki)
             self.ext_rel_url.setText(g("ext.rel.url") or "")
+            self.ext_rel_db.setText(g("ext.rel.database") or "")
             self.ext_rel_user.setText(g("ext.rel.user") or "")
             self.ext_rel_pass.setText(g("ext.rel.password") or "")
+            self._on_rel_kind_changed()
             self.ext_graph_enable.setChecked(g("ext.graph.enabled") == "1")
             self.ext_graph_store.setText(g("ext.graph.graph_store_url") or "")
             self.ext_graph_update.setText(g("ext.graph.update_url") or "")
@@ -1675,15 +1691,26 @@ class MainWindow(QWidget):
         finally:
             self._loading = prev
 
+    def _on_rel_kind_changed(self) -> None:
+        mongo = self.ext_rel_kind.currentData() == "mongodb"
+        self.ext_rel_db.setEnabled(mongo)
+        self.ext_rel_url.setPlaceholderText(
+            "mongodb+srv://user:pass@cluster.mongodb.net/   (MongoDB Atlas or local)" if mongo
+            else "postgresql+psycopg://host:5432/dbname  (credentials optional below)")
+        if not self._loading:
+            self._persist_external()
+
     def _current_external_cfg(self):
         from .external import ExternalConfig, GraphConfig, RelationalConfig
 
         return ExternalConfig(
             relational=RelationalConfig(
                 enabled=self.ext_rel_enable.isChecked(),
+                kind=self.ext_rel_kind.currentData() or "sql",
                 url=self.ext_rel_url.text().strip(),
                 user=self.ext_rel_user.text().strip(),
                 password=self.ext_rel_pass.text(),
+                database=self.ext_rel_db.text().strip(),
             ),
             graph=GraphConfig(
                 enabled=self.ext_graph_enable.isChecked(),
@@ -1705,12 +1732,12 @@ class MainWindow(QWidget):
         threading.Thread(target=op.run, daemon=True).start()
 
     def _test_relational(self) -> None:
-        from .external import RelationalSink
+        from .external import structured_sink
 
         rel = self._current_external_cfg().relational
         self.ext_rel_status.setText("Testing…")
         self._run_async(
-            lambda: RelationalSink(rel.url, rel.user, rel.password).test(),
+            lambda: structured_sink(rel).test(),
             lambda msg, ok: self.ext_rel_status.setText(("✓ " if ok else "⚠ ") + msg),
         )
 
@@ -1788,10 +1815,9 @@ class MainWindow(QWidget):
             recs = [r for r in (self.store.get_meeting(i) for i in ids) if r]
             recs.sort(key=lambda r: r["id"])
             errs: list[str] = []
-            # Relational: upsert each meeting (idempotent).
+            # Relational/Mongo: upsert each meeting (idempotent).
             if cfg.relational.enabled and cfg.relational.url:
-                rs = external.RelationalSink(
-                    cfg.relational.url, cfg.relational.user, cfg.relational.password)
+                rs = external.structured_sink(cfg.relational)
                 for rec in recs:
                     try:
                         rs.upsert(rec)
@@ -2018,9 +2044,8 @@ class MainWindow(QWidget):
             from .delivery import McpSink, _mcp_arguments
             McpSink(self._current_delivery_cfg().mcp).send(_mcp_arguments(rec))
         elif dest == "relational":
-            from .external import RelationalSink
-            r = self._current_external_cfg().relational
-            RelationalSink(r.url, r.user, r.password).upsert(rec)
+            from .external import structured_sink
+            structured_sink(self._current_external_cfg().relational).upsert(rec)
         elif dest == "graph":
             from .external import GraphSink
             g = self._current_external_cfg().graph

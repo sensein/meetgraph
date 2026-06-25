@@ -31,9 +31,11 @@ from . import kg
 @dataclass
 class RelationalConfig:
     enabled: bool = False
-    url: str = ""        # e.g. postgresql+psycopg://host:5432/dbname
-    user: str = ""       # optional — injected into the URL if set
+    kind: str = "sql"    # "sql" (SQLAlchemy) | "mongodb"
+    url: str = ""        # SQLAlchemy URL, or a mongodb:// / mongodb+srv:// connection string
+    user: str = ""       # optional — injected into the SQL URL if set
     password: str = ""   # optional — password or access token
+    database: str = ""   # MongoDB database name (defaults to "meetgraph")
 
 
 # Triplestore types and how their SPARQL endpoints are laid out, so the user
@@ -89,8 +91,8 @@ class ExternalConfig:
 
 
 _REL_KEYS = {
-    "enabled": "ext.rel.enabled", "url": "ext.rel.url",
-    "user": "ext.rel.user", "password": "ext.rel.password",
+    "enabled": "ext.rel.enabled", "kind": "ext.rel.kind", "url": "ext.rel.url",
+    "user": "ext.rel.user", "password": "ext.rel.password", "database": "ext.rel.database",
 }
 _GRAPH_KEYS = {
     "enabled": "ext.graph.enabled", "query_url": "ext.graph.query_url",
@@ -121,9 +123,11 @@ def load_config(get_setting) -> ExternalConfig:
         return (v or "0") == "1"
     rel = RelationalConfig(
         enabled=b(get_setting(_REL_KEYS["enabled"])),
+        kind=get_setting(_REL_KEYS["kind"]) or "sql",
         url=get_setting(_REL_KEYS["url"]) or "",
         user=get_setting(_REL_KEYS["user"]) or "",
         password=get_setting(_REL_KEYS["password"]) or "",
+        database=get_setting(_REL_KEYS["database"]) or "",
     )
     g = GraphConfig(
         enabled=b(get_setting(_GRAPH_KEYS["enabled"])),
@@ -321,6 +325,77 @@ class RelationalSink:
 
 
 # --------------------------------------------------------------------------- #
+# MongoDB sink (document store — Atlas or self-hosted)
+# --------------------------------------------------------------------------- #
+class MongoSink:
+    """Mirror meetings to MongoDB. One document per meeting (summary embedded),
+    plus audit_log. Works with MongoDB Atlas (mongodb+srv://) or a local server."""
+
+    def __init__(self, cfg: RelationalConfig):
+        if not cfg.url.strip():
+            raise ValueError("No MongoDB connection string configured.")
+        try:
+            from pymongo import MongoClient
+        except ImportError as exc:  # pragma: no cover - dependency hint
+            raise RuntimeError(
+                "MongoDB support needs pymongo. Install it with: pip install pymongo"
+            ) from exc
+        self._client = MongoClient(cfg.url, serverSelectionTimeoutMS=8000)
+        self._db = self._client[cfg.database or "meetgraph"]
+
+    def _doc(self, rec: dict) -> dict:
+        import json as _json
+
+        try:
+            summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            summary = {}
+        return {
+            "_id": rec.get("id"), "id": rec.get("id"), "user": rec.get("user"),
+            "title": rec.get("title"), "team_id": rec.get("team_id"),
+            "started_at": rec.get("started_at"), "ended_at": rec.get("ended_at"),
+            "created_at": rec.get("created_at"), "summary_md": rec.get("summary_md"),
+            "summary_json": rec.get("summary_json"), "summary": summary,
+            "transcript_md": rec.get("transcript_md"), "transcript_plain": rec.get("transcript_plain"),
+            "links": rec.get("links") or [],
+        }
+
+    def upsert(self, rec: dict) -> None:
+        doc = self._doc(rec)
+        self._db.meetings.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+
+    def append_audit(self, entry: dict) -> None:
+        self._db.audit_log.insert_one(dict(entry))
+
+    def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        q = {"team_id": team_id} if team_id else {}
+        cur = self._db.meetings.find(
+            q, {"id": 1, "user": 1, "title": 1, "team_id": 1, "started_at": 1,
+                "created_at": 1, "summary_md": 1}).sort("id", -1).limit(limit)
+        return [{"id": d.get("id"), "user": d.get("user"), "title": d.get("title"),
+                 "team_id": d.get("team_id"), "started_at": d.get("started_at"),
+                 "created_at": d.get("created_at"), "summary_md": d.get("summary_md")} for d in cur]
+
+    def get_meeting(self, meeting_id) -> dict | None:
+        d = self._db.meetings.find_one({"_id": meeting_id}) or self._db.meetings.find_one({"id": meeting_id})
+        if not d:
+            return None
+        d.pop("_id", None)
+        return d
+
+    def test(self) -> str:
+        self._client.admin.command("ping")
+        return f"Connected to MongoDB (database: {self._db.name})"
+
+
+def structured_sink(cfg: RelationalConfig):
+    """Return the right structured-store sink for the configured kind."""
+    if cfg.kind == "mongodb":
+        return MongoSink(cfg)
+    return RelationalSink(cfg.url, cfg.user, cfg.password)
+
+
+# --------------------------------------------------------------------------- #
 # Graph sink (SPARQL 1.1)
 # --------------------------------------------------------------------------- #
 class GraphSink:
@@ -477,9 +552,7 @@ def push_audit(entry: dict, cfg: ExternalConfig) -> dict[str, str]:
     results: dict[str, str] = {}
     if cfg.relational.enabled and cfg.relational.url:
         try:
-            RelationalSink(
-                cfg.relational.url, cfg.relational.user, cfg.relational.password
-            ).append_audit(entry)
+            structured_sink(cfg.relational).append_audit(entry)
             results["relational"] = "ok"
         except Exception as exc:
             results["relational"] = f"{type(exc).__name__}: {exc}"
@@ -496,9 +569,7 @@ def push_meeting(rec: dict, cfg: ExternalConfig, prev_ids=None) -> dict[str, str
 
     if cfg.relational.enabled and cfg.relational.url:
         try:
-            RelationalSink(
-                cfg.relational.url, cfg.relational.user, cfg.relational.password
-            ).upsert(rec)
+            structured_sink(cfg.relational).upsert(rec)
             results["relational"] = "ok"
         except Exception as exc:
             results["relational"] = f"{type(exc).__name__}: {exc}"

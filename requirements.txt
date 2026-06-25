@@ -25,6 +25,8 @@ pyoxigraph>=0.4
 # MySQL, …). Needs a DB driver too, e.g. psycopg2-binary (PostgreSQL) or
 # pymysql (MySQL). Graph-database (SPARQL) export uses the stdlib `urllib`.
 SQLAlchemy>=2.0
+# Optional: use MongoDB (Atlas or self-hosted) instead of/alongside SQL.
+pymongo>=4.0
 
 # Optional: deliver summaries to an MCP server (Model Context Protocol).
 # REST/webhook delivery and email use the stdlib (urllib / smtplib).
