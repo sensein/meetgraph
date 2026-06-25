@@ -80,7 +80,9 @@ class Store:
                     summary_md      TEXT,
                     summary_json    TEXT,
                     created_at      TEXT,
-                    team_id         TEXT
+                    team_id         TEXT,
+                    edited_by       TEXT,
+                    edited_at       TEXT
                 )
                 """
             )
@@ -150,10 +152,14 @@ class Store:
                 )
                 """
             )
-            # Add team_id to pre-existing databases.
+            # Add newer columns to pre-existing databases.
             cols = {r["name"] for r in con.execute("PRAGMA table_info(meetings)").fetchall()}
             if "team_id" not in cols:
                 con.execute("ALTER TABLE meetings ADD COLUMN team_id TEXT")
+            if "edited_by" not in cols:
+                con.execute("ALTER TABLE meetings ADD COLUMN edited_by TEXT")
+            if "edited_at" not in cols:
+                con.execute("ALTER TABLE meetings ADD COLUMN edited_at TEXT")
         with self._connect_config() as con:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
@@ -357,6 +363,14 @@ class Store:
     def rename_meeting(self, meeting_id: int, title: str) -> None:
         with self._connect() as con:
             con.execute("UPDATE meetings SET title = ? WHERE id = ?", (title, meeting_id))
+
+    def set_summary_edited(self, meeting_id: int, summary_md: str,
+                           edited_by: str, edited_at: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "UPDATE meetings SET summary_md = ?, edited_by = ?, edited_at = ? WHERE id = ?",
+                (summary_md, edited_by, edited_at, meeting_id),
+            )
 
     def update_summary(self, meeting_id: int, summary_md: str, summary_json: str) -> None:
         with self._connect() as con:

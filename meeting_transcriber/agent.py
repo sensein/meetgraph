@@ -303,6 +303,54 @@ def link_key_terms(summary: MeetingSummary) -> MeetingSummary:
     return summary
 
 
+def merge_summaries(base: MeetingSummary, add: MeetingSummary) -> MeetingSummary:
+    """Merge ``add`` into ``base`` (dedup), for incremental live summarization of
+    long meetings — so earlier content is never lost as new speech is summarized."""
+    m, a = base.meeting, add.meeting
+    m.title = m.title or a.title
+    m.date = m.date or a.date
+    m.purpose = m.purpose or a.purpose
+    for p in a.participants:
+        if p not in m.participants:
+            m.participants.append(p)
+
+    topics = {t.topic.strip().lower(): t for t in base.topics}
+    for t in add.topics:
+        k = t.topic.strip().lower()
+        if k in topics:
+            for pt in t.points:
+                if pt not in topics[k].points:
+                    topics[k].points.append(pt)
+            topics[k].attribution = topics[k].attribution or t.attribution
+        else:
+            base.topics.append(t)
+            topics[k] = t
+
+    def _merge_strs(dst, src):
+        seen = {x.strip().lower() for x in dst}
+        for x in src:
+            if x.strip().lower() not in seen:
+                dst.append(x)
+                seen.add(x.strip().lower())
+
+    _merge_strs(base.decisions, add.decisions)
+    _merge_strs(base.open_questions, add.open_questions)
+    _merge_strs(base.research_gaps, add.research_gaps)
+
+    items = {ai.item.strip().lower() for ai in base.action_items}
+    for ai in add.action_items:
+        if ai.item.strip().lower() not in items:
+            base.action_items.append(ai)
+            items.add(ai.item.strip().lower())
+
+    terms = {kt.term.strip().lower() for kt in base.key_terms}
+    for kt in add.key_terms:
+        if kt.term.strip().lower() not in terms:
+            base.key_terms.append(kt)
+            terms.add(kt.term.strip().lower())
+    return base
+
+
 def link_literature(
     summary: MeetingSummary,
     api_key: str | None = None,
@@ -369,16 +417,18 @@ def link_literature(
                 f"Discussion topics:\n{topics}\n\nKey terms: {', '.join(terms)}\n\n"
                 f"Candidate papers:\n{cand}\n\nReturn the assessment.")
             sci = result.output
-            if not sci.is_scientific:
-                return summary  # not a scientific meeting -> no literature section
-            rels = {r.pmid: r for r in sci.relevant}
-            if rels:
-                pubs = [p for p in pubs if p.pmid in rels]
-                for p in pubs:
-                    r = rels.get(p.pmid)
-                    p.relevance = r.relevance if r else None
-                    p.points = list(r.points) if r else []
-            summary.research_gaps = list(sci.gaps)
+            # Enabling PubMed means the user wants the literature: when the model
+            # finds it scientific, filter to the papers it judged relevant (with
+            # points + gaps); otherwise still show the top results, just no gaps.
+            if sci.is_scientific:
+                rels = {r.pmid: r for r in sci.relevant}
+                if rels:
+                    pubs = [p for p in pubs if p.pmid in rels]
+                    for p in pubs:
+                        r = rels.get(p.pmid)
+                        p.relevance = r.relevance if r else None
+                        p.points = list(r.points) if r else []
+                summary.research_gaps = list(sci.gaps)
         except Exception:
             pass  # keep the unfiltered top results
 

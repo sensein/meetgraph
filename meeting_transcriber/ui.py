@@ -250,6 +250,8 @@ class MainWindow(QWidget):
         self._view_json = ""
         self._summary_dirty = False   # new speech since last summary
         self._notes_busy = False      # a summary generation is in flight
+        self._running_summary = None  # incremental live summary (merged across ticks)
+        self._summarized_chars = 0    # transcript length already summarized
         self._processing: set = set()  # (meeting_id, stage) currently being enriched
         self._open_details: dict = {}  # meeting_id -> open MeetingDetailDialog (for live refresh)
         self._loading = True  # suppress config saves while widgets are built/loaded
@@ -2468,11 +2470,24 @@ class MainWindow(QWidget):
             "api_key": self.ai_key.text().strip(),
             "base_url": self.ai_base.text().strip(),
         }
+        # Incremental: once we have a running summary, only summarize the NEW
+        # speech and merge it in — so long meetings stay fast and nothing is lost.
+        full = self.transcript.to_plain()
+        running = getattr(self, "_running_summary", None)
+        done_chars = getattr(self, "_summarized_chars", 0)
+        incremental = running is not None and len(full) > done_chars
+        text = full[done_chars:] if incremental else full
+        if incremental and len(text.strip()) < 40:
+            # Not enough new speech to bother — just re-render what we have.
+            self._set_summary_status("Summary up to date.")
+            return
+
         self._notes_busy = True
         self._summary_dirty = False
         self.summary_btn.setEnabled(False)
         self._set_summary_status("Summarizing…")
-        worker = NotesWorker(config, self.transcript.to_plain(), title=self.meeting_name or None)
+        worker = NotesWorker(config, text, title=self.meeting_name or None,
+                             incremental=incremental, dispatch_len=len(full))
         worker.done.connect(self._on_notes_done)
         worker.failed.connect(self._on_notes_failed)
         self._notes_worker = worker  # keep a reference
@@ -2488,11 +2503,26 @@ class MainWindow(QWidget):
                 and self._summary_dirty and not self._notes_busy and self._notes_ready()):
             self._run_notes()
 
-    def _on_notes_done(self, markdown: str, json_text: str) -> None:
+    def _on_notes_done(self, json_text: str, incremental: bool, dispatch_len: int) -> None:
+        from .agent import MeetingSummary, merge_summaries, summary_to_markdown
+
         self._notes_busy = False
+        self.summary_btn.setEnabled(True)
+        try:
+            chunk = MeetingSummary.model_validate_json(json_text)
+        except Exception:
+            self._set_summary_status("⚠ Could not parse the summary.")
+            return
+        if incremental and getattr(self, "_running_summary", None) is not None:
+            self._running_summary = merge_summaries(self._running_summary, chunk)
+        else:
+            self._running_summary = chunk
+        self._summarized_chars = max(getattr(self, "_summarized_chars", 0), dispatch_len)
+
+        markdown = summary_to_markdown(self._running_summary, title=self.meeting_name or None)
+        json_text = self._running_summary.model_dump_json(indent=2)
         self._last_summary_md = markdown
         self._last_summary_json = json_text
-        self.summary_btn.setEnabled(True)
         self.summary_view.setMarkdown(markdown)  # live summary on the Record tab
         self._set_summary_status(f"Summary updated · {datetime.now():%H:%M:%S}")
         if self._meeting_id is not None:
@@ -2610,6 +2640,8 @@ class MainWindow(QWidget):
         self._view_md = ""
         self._view_json = ""
         self._meeting_id = None
+        self._running_summary = None       # reset incremental running summary
+        self._summarized_chars = 0
 
         self._started_at = datetime.now()
         self.transcript.started_at = self._started_at
@@ -2873,20 +2905,27 @@ class _AsyncOp(QObject):
 
 
 class NotesWorker(QObject):
-    """Runs the (provider-agnostic) Pydantic AI notes agent off the GUI thread."""
+    """Runs the (provider-agnostic) Pydantic AI notes agent off the GUI thread.
 
-    done = pyqtSignal(str, str)  # markdown, json
+    Summarizes the given text (a recent chunk for incremental live updates, or the
+    full transcript) and emits the raw summary JSON; the UI merges it into the
+    running summary. Key-term linking (network) stays off the GUI thread here.
+    """
+
+    done = pyqtSignal(str, bool, int)  # summary json, incremental, dispatch_len
     failed = pyqtSignal(str)
 
-    def __init__(self, config: dict, transcript_text: str, title: str | None):
+    def __init__(self, config, transcript_text, title, incremental=False, dispatch_len=0):
         super().__init__()
         self.config = config
         self.transcript_text = transcript_text
         self.title = title
+        self.incremental = incremental
+        self.dispatch_len = dispatch_len
 
     def run(self) -> None:
         try:
-            from .agent import MeetingNotesAgent, link_key_terms, summary_to_markdown
+            from .agent import MeetingNotesAgent, link_key_terms
 
             agent = MeetingNotesAgent(
                 provider=self.config["provider"],
@@ -2896,10 +2935,7 @@ class NotesWorker(QObject):
             )
             summary = agent.summarize(self.transcript_text, title=self.title)
             link_key_terms(summary)  # resolve key terms -> Wikipedia / Wikidata (best-effort)
-            self.done.emit(
-                summary_to_markdown(summary, title=self.title),
-                summary.model_dump_json(indent=2),
-            )
+            self.done.emit(summary.model_dump_json(), self.incremental, self.dispatch_len)
         except Exception as exc:  # surface to the UI
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
@@ -3008,6 +3044,11 @@ class MeetingDetailDialog(QDialog):
         sub = QLabel(f"{when}   ·   {rec.get('user') or ''}")
         sub.setObjectName("HeaderSubtitle")
         v.addWidget(sub)
+        self._editing = False
+        self._edited_label = QLabel("")
+        self._edited_label.setStyleSheet("color:#0d9488; font-size:11px;")
+        v.addWidget(self._edited_label)
+        self._refresh_edited_label()
 
         scope_row = QHBoxLayout()
         scope_row.setSpacing(8)
@@ -3026,6 +3067,12 @@ class MeetingDetailDialog(QDialog):
         self._view.setOpenExternalLinks(True)  # clickable Wikipedia/Wikidata links
         self._view.setFont(QFont("SF Pro Text", 13))
         v.addWidget(self._view, 1)
+        # Raw-markdown editor (hidden until "Edit"): lets the user refine/add info.
+        self._editor = QTextEdit()
+        self._editor.setObjectName("transcript")
+        self._editor.setFont(QFont("Menlo", 12))
+        self._editor.hide()
+        v.addWidget(self._editor, 1)
         self._update_view()
 
         row = QHBoxLayout()
@@ -3034,6 +3081,14 @@ class MeetingDetailDialog(QDialog):
         rename.setToolTip("Rename this meeting")
         rename.clicked.connect(self._rename)
         row.addWidget(rename)
+        self._edit_btn = QPushButton("Edit")
+        self._edit_btn.setToolTip("Edit the summary and add your own notes")
+        self._edit_btn.clicked.connect(self._toggle_edit)
+        row.addWidget(self._edit_btn)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._exit_edit)
+        self._cancel_btn.hide()
+        row.addWidget(self._cancel_btn)
         copy = QPushButton("Copy")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self._current_md()))
         row.addWidget(copy)
@@ -3073,9 +3128,63 @@ class MeetingDetailDialog(QDialog):
     def _scope(self) -> str:
         return self.scope_combo.currentData()
 
+    def _refresh_edited_label(self) -> None:
+        by = self._rec.get("edited_by")
+        at = (self._rec.get("edited_at") or "")[:16].replace("T", " ")
+        if by:
+            self._edited_label.setText(f"✏ Edited by {by}" + (f" on {at}" if at else ""))
+            self._edited_label.show()
+        else:
+            self._edited_label.hide()
+
+    def _toggle_edit(self) -> None:
+        if not self._editing:
+            self._editing = True
+            self._editor.setPlainText(self._summary_md)
+            self._view.hide()
+            self._editor.show()
+            self._edit_btn.setText("Save changes")
+            self._cancel_btn.show()
+            self.scope_combo.setEnabled(False)
+        else:
+            self._save_edit()
+
+    def _exit_edit(self) -> None:
+        self._editing = False
+        self._editor.hide()
+        self._view.show()
+        self._edit_btn.setText("Edit")
+        self._cancel_btn.hide()
+        self.scope_combo.setEnabled(True)
+
+    def _save_edit(self) -> None:
+        new_md = self._editor.toPlainText()
+        by = self._parent._display_name
+        at = datetime.now().isoformat(timespec="seconds")
+        self._summary_md = new_md
+        self._rec["summary_md"] = new_md
+        self._rec["edited_by"] = by
+        self._rec["edited_at"] = at
+        try:
+            if self._remote:
+                from .external import structured_sink
+                rel = self._parent._current_external_cfg().relational
+                if rel.enabled and rel.url:
+                    structured_sink(rel).upsert(self._rec)
+            else:
+                self._parent.store.set_summary_edited(self._mid, new_md, by, at)
+                self._parent._audit("summary_edited", self._mid, by)
+                self._parent._push_external_async(self._mid)
+        except Exception as exc:
+            QMessageBox.warning(self, "Edit", f"Saved locally, but sync failed: {exc}")
+        self._exit_edit()
+        self._refresh_edited_label()
+        self._update_view()
+        self._parent._refresh_meetings()
+
     def reload(self) -> None:
         """Re-load this meeting from the local store (after background enrichment)."""
-        if self._remote or self._mid is None:
+        if self._remote or self._mid is None or self._editing:
             return
         rec = self._parent.store.get_meeting(self._mid)
         if not rec:
@@ -3086,6 +3195,7 @@ class MeetingDetailDialog(QDialog):
         self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
         self._transcript_md = rec.get("transcript_md") or "_No transcript._"
         self._related_md = self._build_related_md(self._parent, self._mid)
+        self._refresh_edited_label()
         self._update_view()
 
     def _build_related_md(self, parent, meeting_id) -> str:
