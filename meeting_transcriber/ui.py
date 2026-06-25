@@ -46,6 +46,19 @@ from .transcript import Transcript, reveal_in_file_manager
 
 SPEAKER_COLORS = {"You": "#2563eb", "Meeting": "#0d9488"}
 
+# Cloud transcription providers (OpenAI-compatible /audio/transcriptions).
+# key -> (label, base_url, default_model). Future-proof: providers without a
+# speech-to-text API today can still be selected; transcription is attempted via
+# the standard endpoint and just works once they add it.
+COMPAT_PROVIDERS = {
+    "openai": ("OpenAI", "https://api.openai.com/v1", "whisper-1"),
+    "groq": ("Groq", "https://api.groq.com/openai/v1", "whisper-large-v3"),
+    "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", ""),
+    "anthropic": ("Anthropic (Claude)", "https://api.anthropic.com/v1", ""),
+    "local": ("Local server (vLLM / LM Studio…)", "http://localhost:8000/v1", ""),
+    "custom": ("Custom…", "", ""),
+}
+
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"        # full lockup (icon + wordmark)
 ICON_PATH = Path(__file__).parent / "assets" / "logo_icon.png"   # icon only (for header / app icon)
 
@@ -591,10 +604,16 @@ class MainWindow(QWidget):
         openai_l.addWidget(self.openai_model_combo)
         self.engine_stack.addWidget(openai_w)
 
-        # OpenAI-compatible (Groq, self-hosted Whisper, etc.)
+        # OpenAI-compatible (Groq, OpenRouter, Anthropic, self-hosted, custom…)
         compat_w = QWidget()
         compat_l = QHBoxLayout(compat_w)
         compat_l.setContentsMargins(0, 0, 0, 0)
+        compat_l.addWidget(QLabel("Provider:"))
+        self.compat_provider = QComboBox()
+        for key, (label, _url, _model) in COMPAT_PROVIDERS.items():
+            self.compat_provider.addItem(label, key)
+        self.compat_provider.currentIndexChanged.connect(self._on_compat_provider_changed)
+        compat_l.addWidget(self.compat_provider)
         compat_l.addWidget(QLabel("Base URL:"))
         self.compat_base = QLineEdit()
         self.compat_base.setPlaceholderText("https://api.groq.com/openai/v1")
@@ -609,17 +628,19 @@ class MainWindow(QWidget):
         self.compat_model.setEditable(True)
         self.compat_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.compat_model.addItems(["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"])
-        self.compat_model.setMinimumWidth(200)
+        self.compat_model.setMinimumWidth(180)
         compat_l.addWidget(self.compat_model, 1)
         self.engine_stack.addWidget(compat_w)
 
         engine_layout.addWidget(self.engine_stack)
 
         engine_hint = QLabel(
-            "Transcription needs a speech-to-text model. Claude/Anthropic and OpenRouter "
-            "don't offer audio transcription — use Local Whisper, OpenAI, or any "
-            "OpenAI-compatible audio endpoint (e.g. Groq) above. Your Claude/OpenRouter "
-            "choice in “AI notes provider” is still used to write the notes."
+            "Transcription (audio → text) runs on Local Whisper, OpenAI, or any "
+            "OpenAI-compatible audio endpoint. Pick a provider above and MeetGraph "
+            "calls its /audio/transcriptions API — so if Anthropic, OpenRouter, or "
+            "another provider adds speech-to-text later, just select it here and enter "
+            "your key; it works with no update. (Your notes provider is configured "
+            "separately above.)"
         )
         engine_hint.setWordWrap(True)
         engine_hint.setStyleSheet("color:#64748b; font-size:11px;")
@@ -1011,6 +1032,7 @@ class MainWindow(QWidget):
         self.model_combo.currentTextChanged.connect(self._persist_config)
         self.api_key_edit.textChanged.connect(self._persist_config)
         self.openai_model_combo.currentTextChanged.connect(self._persist_config)
+        self.compat_provider.currentIndexChanged.connect(self._persist_config)
         self.compat_base.textChanged.connect(self._persist_config)
         self.compat_key.textChanged.connect(self._persist_config)
         self.compat_model.currentTextChanged.connect(self._persist_config)
@@ -1047,6 +1069,7 @@ class MainWindow(QWidget):
         s("t.local_model", self.model_combo.currentText())
         s("t.openai_key", self.api_key_edit.text())
         s("t.openai_model", self.openai_model_combo.currentText())
+        s("t.compat_provider", self.compat_provider.currentData() or "")
         s("t.compat_base", self.compat_base.text())
         s("t.compat_key", self.compat_key.text())
         s("t.compat_model", self.compat_model.currentText())
@@ -1058,6 +1081,15 @@ class MainWindow(QWidget):
         self._save_ai_fields()
 
     def _load_config(self) -> None:
+        # Guard against widget signals persisting half-loaded state mid-load
+        # (e.g. a provider change auto-filling fields before saved values load).
+        prev, self._loading = self._loading, True
+        try:
+            self._load_config_impl()
+        finally:
+            self._loading = prev
+
+    def _load_config_impl(self) -> None:
         g = self.store.get_setting
         prov = g("ai.provider")
         if prov:
@@ -1081,6 +1113,11 @@ class MainWindow(QWidget):
         om = g("t.openai_model")
         if om:
             self.openai_model_combo.setCurrentText(om)
+        cp = g("t.compat_provider")
+        if cp:
+            i = self.compat_provider.findData(cp)
+            if i >= 0:
+                self.compat_provider.setCurrentIndex(i)
         cb = g("t.compat_base")
         if cb is not None:
             self.compat_base.setText(cb)
@@ -1423,6 +1460,16 @@ class MainWindow(QWidget):
     def _on_engine_changed(self) -> None:
         self.engine_stack.setCurrentIndex(self.engine_combo.currentIndex())
 
+    def _on_compat_provider_changed(self) -> None:
+        key = self.compat_provider.currentData()
+        if key == "custom":
+            return  # leave the user's own values untouched
+        _label, url, model = COMPAT_PROVIDERS.get(key, ("", "", ""))
+        if url:
+            self.compat_base.setText(url)
+        if model:
+            self.compat_model.setCurrentText(model)
+
     def _on_start(self) -> None:
         sources = []
         if self.mic_check.isChecked():
@@ -1529,8 +1576,8 @@ class MainWindow(QWidget):
     def _set_settings_enabled(self, enabled: bool) -> None:
         for w in (
             self.engine_combo, self.model_combo, self.api_key_edit,
-            self.openai_model_combo, self.compat_base, self.compat_key,
-            self.compat_model, self.lang_edit, self.mic_check,
+            self.openai_model_combo, self.compat_provider, self.compat_base,
+            self.compat_key, self.compat_model, self.lang_edit, self.mic_check,
             self.sys_check, self.mic_combo, self.sys_combo,
         ):
             w.setEnabled(enabled)
