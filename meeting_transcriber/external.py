@@ -18,12 +18,39 @@ reports an error string; it never raises into the UI/recording path.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
 from . import kg
+
+# --------------------------------------------------------------------------- #
+# Global meeting ids — so a shared database doesn't collide across team members.
+#
+# Each install uses its own local autoincrement ids (1, 2, 3, …), so two members
+# would both push a meeting "#1" and clobber each other in the shared store. We
+# derive a stable, globally-unique id from (per-install node id, local id) before
+# pushing. Global ids live in a high range so the mapping is idempotent: a value
+# that is already global (e.g. a remote cross-link reference) passes through
+# unchanged.
+# --------------------------------------------------------------------------- #
+_GID_BASE = 1 << 52  # global ids are >= this; local autoincrement ids stay small
+
+
+def global_id(node: str, local_id) -> int | None:
+    """Map a local meeting id to a stable global id for the shared store.
+
+    Idempotent: ids already in the global range are returned unchanged, so it is
+    safe to apply to records whose links mix local and remote references."""
+    if local_id is None:
+        return None
+    lid = int(local_id)
+    if lid >= _GID_BASE:
+        return lid  # already global (e.g. a reference pulled from a remote store)
+    h = hashlib.blake2b(f"{node}:{lid}".encode(), digest_size=6).digest()
+    return _GID_BASE + int.from_bytes(h, "big")  # 48-bit offset -> stays < 2**53
 
 # --------------------------------------------------------------------------- #
 # Config (loaded from / saved to the settings DB by the UI)

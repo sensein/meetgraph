@@ -241,6 +241,13 @@ class MainWindow(QWidget):
         self._display_name = user_name.strip() or "Local"
         self.team_id = (self.store.get_setting("team.id") or "").strip()
         self.team_name = (self.store.get_setting("team.name") or "").strip()
+        # Stable per-install id so meetings get globally-unique ids in a shared DB
+        # (local autoincrement ids would otherwise collide across team members).
+        self._node_id = (self.store.get_setting("node.id") or "").strip()
+        if not self._node_id:
+            import secrets
+            self._node_id = secrets.token_hex(8)
+            self.store.set_setting("node.id", self._node_id)
         self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
@@ -1149,9 +1156,10 @@ are stored locally in a protected config file.</p>
         manage.setToolTip("View the team keys you've generated; copy or revoke them.")
         manage.clicked.connect(lambda: TeamKeysDialog(self).exec())
         btns.addWidget(manage)
-        leave = QPushButton("Leave team")
-        leave.clicked.connect(self._leave_team)
-        btns.addWidget(leave)
+        self.leave_btn = QPushButton("Leave team")
+        self.leave_btn.setToolTip("Leave the current team and stop syncing to its shared database.")
+        self.leave_btn.clicked.connect(self._leave_team)
+        btns.addWidget(self.leave_btn)
         btns.addStretch()
         log_btn = QPushButton("Activity log…")
         log_btn.clicked.connect(self._show_activity_log)
@@ -1389,10 +1397,19 @@ are stored locally in a protected config file.</p>
     def _update_team_status(self) -> None:
         if getattr(self, "team_status", None) is None:
             return
-        if self.team_id:
+        in_team = bool(self.team_id)
+        if in_team:
             self.team_status.setText(f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database.")
         else:
             self.team_status.setText("Not in a team. Generate a key to start one, or paste a key to join.")
+        # Leave only makes sense when you're actually in a team.
+        if getattr(self, "leave_btn", None) is not None:
+            self.leave_btn.setVisible(in_team)
+        # The team feed reads from the shared DB — only relevant in a team.
+        if getattr(self, "team_feed_check", None) is not None:
+            self.team_feed_check.setEnabled(in_team)
+            if not in_team and self.team_feed_check.isChecked():
+                self.team_feed_check.setChecked(False)
 
     def _fill_graph_endpoints(self) -> None:
         """Derive query/update/store URLs from the chosen DB type + base URL."""
@@ -2037,8 +2054,25 @@ are stored locally in a protected config file.</p>
             return
         from . import external
 
-        self._run_async(lambda: (external.delete_remote(meeting_id, cfg) and "") or "",
+        gid = self._gid(meeting_id)  # remote rows are keyed by the global id
+        self._run_async(lambda: (external.delete_remote(gid, cfg) and "") or "",
                         lambda m, ok: None)
+
+    def _gid(self, local_id):
+        """Local meeting id -> stable global id for the shared store (idempotent)."""
+        from . import external
+        return external.global_id(self._node_id, local_id)
+
+    def _extern_rec(self, rec: dict) -> dict:
+        """Copy of a meeting record with its id (and cross-link related ids)
+        mapped to global ids, so it doesn't collide with teammates' meetings."""
+        rec = dict(rec)
+        if rec.get("id") is not None:
+            rec["links"] = self.store.get_links(rec["id"]) if not rec.get("links") else rec["links"]
+            rec["id"] = self._gid(rec["id"])
+        rec["links"] = [{**l, "related_id": self._gid(l.get("related_id"))}
+                        for l in (rec.get("links") or [])]
+        return rec
 
     def _push_external_async(self, meeting_id) -> None:
         """Mirror one meeting to any enabled external DB, in the background."""
@@ -2055,8 +2089,8 @@ are stored locally in a protected config file.</p>
             rec = self.store.get_meeting(meeting_id)
             if not rec:
                 return "no record"
-            prev = self._prev_meeting_id(meeting_id, rec.get("user"))
-            res = external.push_meeting(rec, cfg, [prev] if prev else None)
+            prev = self._gid(self._prev_meeting_id(meeting_id, rec.get("user")))
+            res = external.push_meeting(self._extern_rec(rec), cfg, [prev] if prev else None)
             for k, v in res.items():
                 if v == "ok":
                     self.store.mark_sent(meeting_id, k)  # dedup future bulk sync
@@ -2090,7 +2124,7 @@ are stored locally in a protected config file.</p>
         self.ext_sync_status.setText(f"Syncing {len(ids)} meeting(s)…")
 
         def work():
-            recs = [r for r in (self.store.get_meeting(i) for i in ids) if r]
+            recs = [self._extern_rec(r) for r in (self.store.get_meeting(i) for i in ids) if r]
             recs.sort(key=lambda r: r["id"])
             errs: list[str] = []
             # Relational/Mongo: upsert each meeting (idempotent).
@@ -2354,7 +2388,7 @@ are stored locally in a protected config file.</p>
             McpSink(self._current_delivery_cfg().mcp).send(_mcp_arguments(rec))
         elif dest == "relational":
             from .external import structured_sink
-            structured_sink(self._current_external_cfg().relational).upsert(rec)
+            structured_sink(self._current_external_cfg().relational).upsert(self._extern_rec(rec))
         elif dest == "graph":
             from .external import GraphSink
             g = self._current_external_cfg().graph
@@ -2364,9 +2398,9 @@ are stored locally in a protected config file.</p>
                     summary = _json.loads(rec["summary_json"])
                 except Exception:
                     summary = {}
-            prev = self._prev_meeting_id(rec["id"], rec.get("user"))
-            rec["links"] = self.store.get_links(rec["id"])
-            GraphSink(g).push_meeting(rec, summary, [prev] if prev else None, links=rec["links"])
+            prev = self._gid(self._prev_meeting_id(rec["id"], rec.get("user")))
+            grec = self._extern_rec(rec)
+            GraphSink(g).push_meeting(grec, summary, [prev] if prev else None, links=grec["links"])
         else:
             raise ValueError(f"unknown destination {dest}")
 
@@ -2486,8 +2520,8 @@ are stored locally in a protected config file.</p>
             rec["links"] = links
             push_res = {}
             if mode != "local_only" and (cfg.relational.enabled or cfg.graph.enabled):
-                prev = self._prev_meeting_id(meeting_id, rec.get("user"))
-                push_res = external.push_meeting(rec, cfg, [prev] if prev else None)
+                prev = self._gid(self._prev_meeting_id(meeting_id, rec.get("user")))
+                push_res = external.push_meeting(self._extern_rec(rec), cfg, [prev] if prev else None)
                 for k, v in push_res.items():
                     if v == "ok":
                         self.store.mark_sent(meeting_id, k)
