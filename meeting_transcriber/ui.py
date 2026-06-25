@@ -815,6 +815,14 @@ class MainWindow(QWidget):
             "Remote only: after a successful sync, the local copy is removed (your DB is the system of record).\n"
             "Local only: keep on this machine; never auto-sync to a database.")
         mode_row.addWidget(self.storage_mode)
+        mode_row.addSpacing(16)
+        mode_row.addWidget(QLabel("Sync:"))
+        self.sync_policy = QComboBox()
+        self.sync_policy.addItem("Mirror all (incl. deletions)", "mirror")
+        self.sync_policy.addItem("Add & update only", "add_only")
+        self.sync_policy.setToolTip("Mirror all: additions, updates, and deletions propagate to the "
+                                    "database.\nAdd & update only: never delete from the database.")
+        mode_row.addWidget(self.sync_policy)
         mode_row.addStretch()
         outer.addLayout(mode_row)
         mode_hint = QLabel("Choose where your meetings live, and share accordingly. "
@@ -969,6 +977,10 @@ class MainWindow(QWidget):
         join = QPushButton("Join team (paste key)…")
         join.clicked.connect(self._join_team)
         btns.addWidget(join)
+        manage = QPushButton("Manage keys…")
+        manage.setToolTip("View the team keys you've generated; copy or revoke them.")
+        manage.clicked.connect(lambda: TeamKeysDialog(self).exec())
+        btns.addWidget(manage)
         leave = QPushButton("Leave team")
         leave.clicked.connect(self._leave_team)
         btns.addWidget(leave)
@@ -1560,6 +1572,9 @@ class MainWindow(QWidget):
         self.ext_rel_kind.currentIndexChanged.connect(self._persist_external)
         self.ext_graph_type.currentIndexChanged.connect(self._persist_external)
         self.storage_mode.currentIndexChanged.connect(self._persist_external)
+        self.sync_policy.currentIndexChanged.connect(self._persist_external)
+        self.ext_rel_enable.toggled.connect(self._auto_sync_on_enable)
+        self.ext_graph_enable.toggled.connect(self._auto_sync_on_enable)
         for w in (self.email_host, self.email_port, self.email_user, self.email_pass,
                   self.email_from, self.email_recipients):
             w.textChanged.connect(self._persist_email)
@@ -1590,6 +1605,7 @@ class MainWindow(QWidget):
         s("ext.graph.base", self.ext_graph_base.text().strip())
         s("ext.graph.dataset", self.ext_graph_dataset.text().strip())
         s("storage.mode", self.storage_mode.currentData() or "local_remote")
+        s("sync.policy", self.sync_policy.currentData() or "mirror")
         s("ext.graph.user", self.ext_graph_user.text().strip())
         s("ext.graph.password", self.ext_graph_pass.text())
 
@@ -1685,6 +1701,10 @@ class MainWindow(QWidget):
             si = self.storage_mode.findData(sm)
             if si >= 0:
                 self.storage_mode.setCurrentIndex(si)
+            sp = g("sync.policy") or "mirror"
+            spi = self.sync_policy.findData(sp)
+            if spi >= 0:
+                self.sync_policy.setCurrentIndex(spi)
             self._fill_graph_endpoints()  # set read-only state for the chosen type
             self.ext_graph_user.setText(g("ext.graph.user") or "")
             self.ext_graph_pass.setText(g("ext.graph.password") or "")
@@ -1761,6 +1781,29 @@ class MainWindow(QWidget):
 
     def _storage_mode(self) -> str:
         return self.storage_mode.currentData() or "local_remote"
+
+    def _sync_policy(self) -> str:
+        return self.sync_policy.currentData() or "mirror"
+
+    def _auto_sync_on_enable(self, checked: bool) -> None:
+        """When a remote database is switched on, backfill all meetings to it."""
+        if self._loading or not checked or self._storage_mode() == "local_only":
+            return
+        self._sync_all_external()
+
+    def _delete_remote_async(self, meeting_id) -> None:
+        """Propagate a local deletion to the remote DB(s), when policy allows."""
+        if meeting_id is None or self._storage_mode() == "local_only":
+            return
+        if self._sync_policy() != "mirror":
+            return  # add/update-only: never delete remotely
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+
+        self._run_async(lambda: (external.delete_remote(meeting_id, cfg) and "") or "",
+                        lambda m, ok: None)
 
     def _push_external_async(self, meeting_id) -> None:
         """Mirror one meeting to any enabled external DB, in the background."""
@@ -1874,14 +1917,27 @@ class MainWindow(QWidget):
                 "Enable and configure an external relational and/or graph database above, then "
                 "generate the key — it bundles those connection settings for your team.")
             return
+        from PyQt6.QtWidgets import QInputDialog
+
+        label, ok = QInputDialog.getText(
+            self, "New team key", "Label for this key (optional, e.g. 'engineering', 'Q3 offsite'):")
+        if not ok:
+            return
+        label = label.strip()
         tid = self.team_id or team.new_team_id()
         name = self.team_name_edit.text().strip() or "My Team"
-        key = team.make_team_key(name, tid, cfg)
+        kid = team.new_key_id()
+        created = datetime.now().isoformat(timespec="seconds")
+        key = team.make_team_key(name, tid, cfg, key_id=kid, label=label, created=created)
         self.team_id, self.team_name = tid, name
         self.store.set_setting("team.id", tid)
         self.store.set_setting("team.name", name)
+        try:
+            self.store.add_team_key(kid, label, tid, name, key, created)
+        except Exception:
+            pass
         self._update_team_status()
-        self._audit("team_key_generated", None, name)
+        self._audit("team_key_generated", None, label or kid)
         self._show_key_dialog(key)
 
     def _show_key_dialog(self, key: str) -> None:
@@ -1925,12 +1981,27 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid key", str(exc))
             return
-        # Apply the shared external DB config into the widgets (guarded), then enable.
         ext = parsed["external"]
+        # Reject revoked keys (checked against the shared DB when reachable).
+        kid = parsed.get("key_id")
+        if kid and ext.relational.enabled and ext.relational.url:
+            try:
+                from .external import structured_sink
+                if kid in structured_sink(ext.relational).revoked_key_ids():
+                    QMessageBox.warning(self, "Key revoked",
+                                        "This team key has been revoked. Ask your team for a new one.")
+                    return
+            except Exception:
+                pass  # can't reach the DB to check — allow, fail later if truly unusable
+        # Apply the shared external DB config into the widgets (guarded), then enable.
         prev, self._loading = self._loading, True
         try:
             self.ext_rel_enable.setChecked(ext.relational.enabled)
+            ki = self.ext_rel_kind.findData(ext.relational.kind or "sql")
+            if ki >= 0:
+                self.ext_rel_kind.setCurrentIndex(ki)
             self.ext_rel_url.setText(ext.relational.url)
+            self.ext_rel_db.setText(ext.relational.database)
             self.ext_rel_user.setText(ext.relational.user)
             self.ext_rel_pass.setText(ext.relational.password)
             self.ext_graph_enable.setChecked(ext.graph.enabled)
@@ -1942,15 +2013,18 @@ class MainWindow(QWidget):
             self.ext_graph_pass.setText(ext.graph.password)
         finally:
             self._loading = prev
+        self._on_rel_kind_changed()
         self._persist_external()
         self.team_id, self.team_name = parsed["id"], parsed["team"]
         self.store.set_setting("team.id", self.team_id)
         self.store.set_setting("team.name", self.team_name)
         self._update_team_status()
         self._audit("team_joined", None, self.team_name)
+        if self._storage_mode() != "local_only":
+            self._sync_all_external()  # backfill existing meetings to the shared DB
         QMessageBox.information(
             self, "Joined team",
-            f"You're now in “{self.team_name}”. Your meetings will sync to the shared database.")
+            f"You're now in “{self.team_name}”. Your meetings sync to the shared database automatically.")
 
     def _leave_team(self) -> None:
         if not self.team_id:
@@ -2909,6 +2983,7 @@ class MeetingDetailDialog(QDialog):
         try:
             self._parent.store.delete_meeting(self._mid)
             self._parent._audit("meeting_deleted", self._mid, self._rec.get("title"))
+            self._parent._delete_remote_async(self._mid)  # propagate deletion if policy allows
             self._parent._refresh_meetings()
         except Exception:
             pass
@@ -2959,6 +3034,117 @@ class ActivityLogDialog(QDialog):
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         v.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+
+class TeamKeysDialog(QDialog):
+    """View the team keys you've generated; copy or revoke them."""
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._win = main_window
+        self.setWindowTitle("Team keys")
+        self.setWindowIcon(app_icon())
+        self.resize(680, 420)
+        v = QVBoxLayout(self)
+        head = QLabel("Team keys you've issued")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Generate several keys (e.g. per group) and revoke any of them. Revoking records "
+                     "it in the shared database so teammates can no longer join with that key.")
+        sub.setObjectName("HeaderSubtitle")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Label", "Created", "Status", "Team"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        v.addWidget(self.table, 1)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#64748b; font-size:11px;")
+        v.addWidget(self.status)
+
+        row = QHBoxLayout()
+        copy = QPushButton("Copy key")
+        copy.clicked.connect(self._copy)
+        row.addWidget(copy)
+        revoke = QPushButton("Revoke key")
+        revoke.setObjectName("danger")
+        revoke.clicked.connect(self._revoke)
+        row.addWidget(revoke)
+        row.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+        self._reload()
+
+    def _reload(self) -> None:
+        try:
+            self._keys = self._win.store.list_team_keys()
+        except Exception:
+            self._keys = []
+        self.table.setRowCount(len(self._keys))
+        for r, k in enumerate(self._keys):
+            cells = [
+                k.get("label") or "(no label)",
+                (k.get("created_at") or "")[:16].replace("T", " "),
+                "Revoked" if k.get("revoked") else "Active",
+                k.get("team_name") or k.get("team_id") or "",
+            ]
+            for c, val in enumerate(cells):
+                self.table.setItem(r, c, QTableWidgetItem(str(val)))
+
+    def _selected(self) -> dict | None:
+        r = self.table.currentRow()
+        return self._keys[r] if 0 <= r < len(self._keys) else None
+
+    def _copy(self) -> None:
+        k = self._selected()
+        if not k:
+            self.status.setText("Select a key first.")
+            return
+        QApplication.clipboard().setText(k.get("key") or "")
+        self.status.setText(f"Copied “{k.get('label') or k.get('key_id')}” to the clipboard.")
+
+    def _revoke(self) -> None:
+        k = self._selected()
+        if not k:
+            self.status.setText("Select a key first.")
+            return
+        if k.get("revoked"):
+            self.status.setText("That key is already revoked.")
+            return
+        if QMessageBox.question(
+            self, "Revoke key",
+            f"Revoke “{k.get('label') or k.get('key_id')}”? Teammates will no longer be able to "
+            "join with it (enforced via the shared database).",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        kid = k.get("key_id")
+        self._win.store.set_key_revoked(kid, True)
+        self._win._audit("key_revoked", None, k.get("label") or kid)
+        self._reload()
+        self.status.setText("Revoked locally; recording in the shared database…")
+        rel = self._win._current_external_cfg().relational
+        email = self._win.user_email
+        ts = datetime.now().isoformat(timespec="seconds")
+
+        def work():
+            if rel.enabled and rel.url:
+                from .external import structured_sink
+                structured_sink(rel).revoke_key(kid, email, ts)
+                return "Revocation recorded in the shared database."
+            return "Revoked locally (no shared database configured to broadcast it)."
+
+        self._win._run_async(work, lambda m, ok: self.status.setText(("✓ " if ok else "⚠ ") + m))
 
 
 class EmailComposeDialog(QDialog):

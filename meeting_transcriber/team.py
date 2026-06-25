@@ -28,12 +28,21 @@ def new_team_id() -> str:
     return secrets.token_hex(8)
 
 
-def make_team_key(team_name: str, team_id: str, external: ExternalConfig) -> str:
-    """Encode a shareable team key from the team identity + external DB config."""
+def new_key_id() -> str:
+    return secrets.token_hex(6)
+
+
+def make_team_key(team_name: str, team_id: str, external: ExternalConfig,
+                  key_id: str = "", label: str = "", created: str = "") -> str:
+    """Encode a shareable team key. Each key carries a unique ``key_id`` so a
+    team can issue several keys and revoke them individually."""
     payload = {
         "v": 1,
         "team": team_name or "",
         "id": team_id or new_team_id(),
+        "key_id": key_id or new_key_id(),
+        "label": label or "",
+        "created": created or "",
         "external": {
             "relational": asdict(external.relational),
             "graph": asdict(external.graph),
@@ -44,7 +53,7 @@ def make_team_key(team_name: str, team_id: str, external: ExternalConfig) -> str
 
 
 def parse_team_key(key: str) -> dict:
-    """Decode a team key -> {'team', 'id', 'external': ExternalConfig}. Raises ValueError."""
+    """Decode a team key -> {'team','id','key_id','label','external'}. Raises ValueError."""
     key = (key or "").strip()
     if not key.startswith(_PREFIX):
         raise ValueError("Not a MeetGraph team key.")
@@ -61,4 +70,6 @@ def parse_team_key(key: str) -> dict:
         relational=RelationalConfig(**{k: rel[k] for k in rel if k in RelationalConfig.__dataclass_fields__}),
         graph=GraphConfig(**{k: g[k] for k in g if k in GraphConfig.__dataclass_fields__}),
     )
-    return {"team": data.get("team", ""), "id": data.get("id", ""), "external": external}
+    return {"team": data.get("team", ""), "id": data.get("id", ""),
+            "key_id": data.get("key_id", ""), "label": data.get("label", ""),
+            "external": external}

@@ -108,6 +108,20 @@ class Store:
                 )
                 """
             )
+            # Team keys this user has generated (for viewing / revoking).
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS team_keys (
+                    key_id      TEXT PRIMARY KEY,
+                    label       TEXT,
+                    team_id     TEXT,
+                    team_name   TEXT,
+                    key         TEXT,
+                    created_at  TEXT,
+                    revoked     INTEGER DEFAULT 0
+                )
+                """
+            )
             # Audit log — who did what (create/edit/delete/sync), kept for accountability.
             con.execute(
                 """
@@ -236,6 +250,28 @@ class Store:
                 "SELECT 1 FROM delivery_state WHERE meeting_id = ? AND destination = ?",
                 (meeting_id, destination),
             ).fetchone() is not None
+
+    def add_team_key(self, key_id: str, label: str, team_id: str, team_name: str,
+                     key: str, created_at: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO team_keys(key_id, label, team_id, team_name, key, created_at, revoked) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (key_id, label, team_id, team_name, key, created_at),
+            )
+
+    def list_team_keys(self) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT key_id, label, team_id, team_name, key, created_at, revoked "
+                "FROM team_keys ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def set_key_revoked(self, key_id: str, revoked: bool = True) -> None:
+        with self._connect() as con:
+            con.execute("UPDATE team_keys SET revoked = ? WHERE key_id = ?",
+                        (1 if revoked else 0, key_id))
 
     def log_action(
         self,

@@ -202,6 +202,11 @@ class RelationalSink:
                 Column("actor_name", Text), Column("actor_email", Text),
                 Column("action", Text), Column("target_id", BigInteger), Column("detail", Text),
             ),
+            "revoked_keys": Table(
+                "meetgraph_revoked_keys", self._meta,
+                Column("key_id", Text, primary_key=True),
+                Column("ts", Text), Column("revoked_by", Text),
+            ),
             "participants": Table(
                 "meetgraph_participants", self._meta, pk(), fk(), Column("name", Text),
             ),
@@ -286,6 +291,16 @@ class RelationalSink:
                 if rows:
                     conn.execute(insert(t[name]), rows)
 
+    def delete_meeting(self, meeting_id) -> None:
+        from sqlalchemy import delete
+
+        t = self._t
+        with self._engine.begin() as conn:
+            for name in ("participants", "topics", "decisions", "open_questions",
+                         "action_items", "key_terms", "meeting_links"):
+                conn.execute(delete(t[name]).where(t[name].c.meeting_id == meeting_id))
+            conn.execute(delete(t["meetings"]).where(t["meetings"].c.id == meeting_id))
+
     def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
         """List meetings in the shared DB (optionally for one team), newest first."""
         from sqlalchemy import select
@@ -315,6 +330,21 @@ class RelationalSink:
                ("ts", "team_id", "actor_name", "actor_email", "action", "target_id", "detail")}
         with self._engine.begin() as conn:
             conn.execute(insert(self._t["audit_log"]).values(**row))
+
+    def revoke_key(self, key_id: str, revoked_by: str = "", ts: str = "") -> None:
+        from sqlalchemy import delete, insert
+
+        t = self._t["revoked_keys"]
+        with self._engine.begin() as conn:
+            conn.execute(delete(t).where(t.c.key_id == key_id))
+            conn.execute(insert(t).values(key_id=key_id, ts=ts, revoked_by=revoked_by))
+
+    def revoked_key_ids(self) -> set:
+        from sqlalchemy import select
+
+        t = self._t["revoked_keys"]
+        with self._engine.connect() as conn:
+            return {r[0] for r in conn.execute(select(t.c.key_id)).all()}
 
     def test(self) -> str:
         from sqlalchemy import text
@@ -367,6 +397,13 @@ class MongoSink:
     def append_audit(self, entry: dict) -> None:
         self._db.audit_log.insert_one(dict(entry))
 
+    def revoke_key(self, key_id: str, revoked_by: str = "", ts: str = "") -> None:
+        self._db.revoked_keys.replace_one(
+            {"_id": key_id}, {"_id": key_id, "ts": ts, "revoked_by": revoked_by}, upsert=True)
+
+    def revoked_key_ids(self) -> set:
+        return {d["_id"] for d in self._db.revoked_keys.find({}, {"_id": 1})}
+
     def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
         q = {"team_id": team_id} if team_id else {}
         cur = self._db.meetings.find(
@@ -382,6 +419,9 @@ class MongoSink:
             return None
         d.pop("_id", None)
         return d
+
+    def delete_meeting(self, meeting_id) -> None:
+        self._db.meetings.delete_one({"_id": meeting_id})
 
     def test(self) -> str:
         self._client.admin.command("ping")
@@ -451,6 +491,17 @@ class GraphSink:
                           "application/n-triples", "POST")  # merge into the graph
         else:
             raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
+
+    def delete_meeting(self, meeting_id) -> None:
+        """Remove one meeting's triples from the shared named graph."""
+        ng = self.named_graph
+        m = kg.meeting_iri(meeting_id)
+        if self.cfg.update_url:
+            upd = (f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                   f'FILTER(?s = <{m}> || STRSTARTS(STR(?s), "{m}/")) }} }}')
+            self._request(self.cfg.update_url, upd.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        # Graph Store Protocol can't delete a sub-resource set cleanly; needs Update.
 
     def clear_graph(self) -> None:
         """Empty the 'meetgraph' named graph (used before a full re-sync)."""
@@ -556,6 +607,24 @@ def push_audit(entry: dict, cfg: ExternalConfig) -> dict[str, str]:
             results["relational"] = "ok"
         except Exception as exc:
             results["relational"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
+def delete_remote(meeting_id, cfg: ExternalConfig) -> dict[str, str]:
+    """Propagate a deletion to every enabled external store."""
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).delete_meeting(meeting_id)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    if cfg.graph.enabled and (cfg.graph.update_url or cfg.graph.graph_store_url):
+        try:
+            GraphSink(cfg.graph).delete_meeting(meeting_id)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
     return results
 
 
