@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local app data / secrets
+*.db
+globus_tokens.json
+
+# Exported meeting artifacts
+meeting-*.md
+meeting-*.json
+meeting-notes-*.md
+meeting-notes-*.json
+meetgraph-*.md
+meetgraph-*.json

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetgraph"
+version = "0.1.0"
+description = "MeetGraph — turning meetings into a knowledge graph: record, transcribe live, and generate structured AI notes."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Tek Raj Chhetri", email = "tekraj@mit.edu" }]
+keywords = ["transcription", "whisper", "meeting", "notes", "knowledge-graph", "pydantic-ai", "audio"]
+
+dependencies = [
+    "PyQt6>=6.6",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "soxr>=0.3.7",
+    "faster-whisper>=1.0.0",
+    "openai>=1.30",
+    "pydantic-ai-slim[anthropic,openai]>=2.0",
+    "globus-sdk>=3",
+]
+
+[project.scripts]
+meetgraph = "meeting_transcriber.ui:run"
+
+[project.urls]
+Homepage = "https://github.com/tekrajchhetri/meetgraph"
+
+[tool.setuptools.packages.find]
+include = ["meeting_transcriber*"]
+
+[tool.setuptools.package-data]
+# Ship the logo and the bundled meeting-notes skill (schema, prompts, cleaner).
+"meeting_transcriber" = [
+    "assets/*",
+    "skills/*",
+    "skills/**/*",
+]

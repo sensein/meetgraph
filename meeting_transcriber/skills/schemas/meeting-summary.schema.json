@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.org/schemas/meeting-summary.schema.json",
+  "title": "MeetingSummary",
+  "description": "Structured, faithful summary of a single meeting transcript.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meeting", "topics", "decisions", "open_questions", "action_items"],
+  "properties": {
+    "meeting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "date", "participants", "purpose"],
+      "properties": {
+        "title": { "type": ["string", "null"] },
+        "date": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 date if explicitly stated in the transcript, else null."
+        },
+        "participants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Speaker names present in the transcript."
+        },
+        "purpose": { "type": ["string", "null"] }
+      }
+    },
+    "topics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic", "points"],
+        "properties": {
+          "topic": { "type": "string" },
+          "points": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Short, paraphrased factual statements. No quotes or full paragraphs.",
+            "minItems": 1
+          },
+          "attribution": {
+            "type": ["string", "null"],
+            "description": "Person whose view this topic primarily reflects, if one person owns it; else null."
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Things actually agreed, settled, or chosen. Conditional decisions keep their condition in the string."
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Explicitly deferred or unresolved items."
+    },
+    "action_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "owner", "due"],
+        "properties": {
+          "item": { "type": "string" },
+          "owner": {
+            "type": ["string", "null"],
+            "description": "Named/clearly-implied owner, else null. Never guessed."
+          },
+          "due": {
+            "type": ["string", "null"],
+            "description": "Stated deadline or trigger, else null."
+          }
+        }
+      }
+    }
+  }
+}
