@@ -713,9 +713,13 @@ class MainWindow(QWidget):
         openai_l.addWidget(self.api_key_edit)
         openai_l.addWidget(QLabel("Model:"))
         self.openai_model_combo = QComboBox()
+        self.openai_model_combo.setEditable(True)  # type any model id
+        self.openai_model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.openai_model_combo.addItems(
-            ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
+            ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
         )
+        self.openai_model_combo.setToolTip("Pick or type any OpenAI transcription model id")
+        self.openai_model_combo.setMinimumWidth(200)
         openai_l.addWidget(self.openai_model_combo)
         self.engine_stack.addWidget(openai_w)
 
@@ -771,6 +775,17 @@ class MainWindow(QWidget):
         self.hf_token_edit.setText(os.environ.get("HF_TOKEN", os.environ.get("HUGGING_FACE_HUB_TOKEN", "")))
         hf_row.addWidget(self.hf_token_edit, 1)
         engine_layout.addLayout(hf_row)
+
+        test_row = QHBoxLayout()
+        test_btn = QPushButton("Test transcription")
+        test_btn.setToolTip("Check the selected engine + model works (local models download on first run).")
+        test_btn.clicked.connect(self._test_transcription)
+        test_row.addWidget(test_btn)
+        self.engine_test_status = QLabel("")
+        self.engine_test_status.setStyleSheet("color:#64748b; font-size:11px;")
+        test_row.addWidget(self.engine_test_status, 1)
+        engine_layout.addLayout(test_row)
+
         self._update_compute_label()
         return engine_box
 
@@ -1406,7 +1421,14 @@ class MainWindow(QWidget):
         self.auto_notes = QCheckBox("Auto-generate notes when I Stop")
         self.auto_notes.setChecked(True)
         row3.addWidget(self.auto_notes)
+        notes_test_btn = QPushButton("Test model")
+        notes_test_btn.setToolTip("Run a quick summarization to verify the notes provider + model.")
+        notes_test_btn.clicked.connect(self._test_notes_model)
+        row3.addWidget(notes_test_btn)
         row3.addStretch()
+        self.notes_test_status = QLabel("")
+        self.notes_test_status.setStyleSheet("color: #64748b; font-size:11px;")
+        row3.addWidget(self.notes_test_status)
         self.notes_status = QLabel("")
         self.notes_status.setStyleSheet("color: #64748b;")
         row3.addWidget(self.notes_status)
@@ -2584,6 +2606,78 @@ class MainWindow(QWidget):
     def _on_engine_changed(self) -> None:
         self.engine_stack.setCurrentIndex(self.engine_combo.currentIndex())
 
+    def _transcription_config(self) -> dict:
+        """Build the transcription engine config from the current widgets."""
+        sel = self.compute_combo.currentData() or "auto"
+        engine = self.engine_combo.currentData()
+        config = {
+            "engine": engine,
+            "language": self.lang_edit.text().strip(),
+            "model_size": self.model_combo.currentText().strip(),
+            "device": sel,
+            "compute_type": {"cpu": "int8", "cuda": "float16"}.get(sel, "auto"),
+            "api_key": self.api_key_edit.text().strip(),
+            "openai_model": self.openai_model_combo.currentText().strip(),
+        }
+        if engine == "compatible":
+            config["api_key"] = self.compat_key.text().strip()
+            config["base_url"] = self.compat_base.text().strip()
+            config["openai_model"] = self.compat_model.currentText().strip()
+        return config
+
+    def _test_transcription(self) -> None:
+        config = self._transcription_config()
+        if config["engine"] == "compatible" and not config.get("base_url"):
+            self.engine_test_status.setText("⚠ Enter the base URL.")
+            return
+        if config["engine"] == "openai" and not config["api_key"]:
+            self.engine_test_status.setText("⚠ Enter your OpenAI API key.")
+            return
+        self.engine_test_status.setText("Testing… (first local run downloads the model)")
+
+        def work():
+            from .transcribe import make_transcriber
+            import numpy as np
+
+            t = make_transcriber(config)
+            try:
+                t.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5s silence
+            finally:
+                try:
+                    t.close()
+                except Exception:
+                    pass
+            return f"Transcription engine ready ({config['engine']})."
+
+        self._run_async(work, lambda m, ok: self.engine_test_status.setText(("✓ " if ok else "⚠ ") + m))
+
+    def _test_notes_model(self) -> None:
+        if not self._notes_ready_provider():
+            self.notes_test_status.setText("⚠ Set the provider's API key first.")
+            return
+        cfg = {
+            "provider": self.ai_provider.currentData(),
+            "model": self.ai_model.currentText().strip(),
+            "api_key": self.ai_key.text().strip(),
+            "base_url": self.ai_base.text().strip(),
+        }
+        self.notes_test_status.setText("Testing model…")
+
+        def work():
+            from .agent import MeetingNotesAgent
+
+            agent = MeetingNotesAgent(provider=cfg["provider"], model_name=cfg["model"] or None,
+                                      api_key=cfg["api_key"] or None, base_url=cfg["base_url"] or None)
+            s = agent.summarize("Alice: Let's ship v2 next week. Bob: Agreed, I'll prep the release notes.",
+                                title=None)
+            return f"Notes model OK — produced {len(s.topics)} topic(s), {len(s.action_items)} action(s)."
+
+        self._run_async(work, lambda m, ok: self.notes_test_status.setText(("✓ " if ok else "⚠ ") + m))
+
+    def _notes_ready_provider(self) -> bool:
+        provider = self.ai_provider.currentData()
+        return not (provider in ("anthropic", "openai", "openrouter") and not self.ai_key.text().strip())
+
     def _on_compat_provider_changed(self) -> None:
         key = self.compat_provider.currentData()
         if key == "custom":
@@ -2608,25 +2702,11 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "No source", "Enable at least one audio source.")
             return
 
-        sel = self.compute_combo.currentData() or "auto"
-        compute_type = {"cpu": "int8", "cuda": "float16"}.get(sel, "auto")
-        engine = self.engine_combo.currentData()
-        config = {
-            "engine": engine,
-            "language": self.lang_edit.text().strip(),
-            "model_size": self.model_combo.currentText().strip(),
-            "device": sel,            # auto | cpu | cuda | mlx (resolved in make_transcriber)
-            "compute_type": compute_type,
-            "api_key": self.api_key_edit.text().strip(),
-            "openai_model": self.openai_model_combo.currentText(),
-        }
-        if engine == "compatible":
-            config["api_key"] = self.compat_key.text().strip()
-            config["base_url"] = self.compat_base.text().strip()
-            config["openai_model"] = self.compat_model.currentText().strip()
-            if not config["base_url"]:
-                QMessageBox.warning(self, "Missing URL", "Enter the OpenAI-compatible base URL.")
-                return
+        config = self._transcription_config()
+        engine = config["engine"]
+        if engine == "compatible" and not config.get("base_url"):
+            QMessageBox.warning(self, "Missing URL", "Enter the OpenAI-compatible base URL.")
+            return
         if engine == "openai" and not config["api_key"]:
             QMessageBox.warning(self, "Missing key", "Enter your OpenAI API key.")
             return
