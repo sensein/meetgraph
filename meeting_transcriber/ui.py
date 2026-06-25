@@ -221,7 +221,7 @@ QDialog { background: #eef1f6; }
 
 
 class MainWindow(QWidget):
-    def __init__(self, user_name: str = "", meeting_name: str = "") -> None:
+    def __init__(self, user_name: str = "", meeting_name: str = "", user_email: str = "") -> None:
         super().__init__()
         self.setWindowTitle("MeetGraph")
         self.setObjectName("Root")
@@ -236,8 +236,11 @@ class MainWindow(QWidget):
         self.devices = list_input_devices()
         self.store = Store()
         self.user = user_name.strip() or "local"
+        self.user_email = (user_email or self.store.get_setting("user_email") or "").strip()
         self.speaker_self = user_name.strip() or "You"
         self._display_name = user_name.strip() or "Local"
+        self.team_id = (self.store.get_setting("team.id") or "").strip()
+        self.team_name = (self.store.get_setting("team.name") or "").strip()
         self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
@@ -531,6 +534,7 @@ class MainWindow(QWidget):
         v.addWidget(self._build_engine_box())
         v.addWidget(self._build_sources_box())
         v.addWidget(self._build_external_box())
+        v.addWidget(self._build_team_box())
         v.addStretch()
 
         scroll = QScrollArea()
@@ -811,6 +815,68 @@ class MainWindow(QWidget):
         sync_row.addWidget(self.ext_sync_status, 1)
         outer.addLayout(sync_row)
         return box
+
+    def _build_team_box(self) -> QGroupBox:
+        box = QGroupBox("Team — share one key so the whole team's notes land in one centralized database")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+        _HINT = "color:#64748b; font-size:11px;"
+
+        form = QFormLayout()
+        self.member_name_edit = QLineEdit(self._display_name if self._display_name != "Local" else "")
+        self.member_name_edit.setPlaceholderText("Your name (shown in the activity log)")
+        form.addRow("Your name", self.member_name_edit)
+        self.member_email_edit = QLineEdit(self.user_email)
+        self.member_email_edit.setPlaceholderText("you@example.com — identifies who did what")
+        form.addRow("Your email", self.member_email_edit)
+        self.team_name_edit = QLineEdit(self.team_name)
+        self.team_name_edit.setPlaceholderText("e.g. Acme Research")
+        form.addRow("Team name", self.team_name_edit)
+        for w in (self.member_name_edit, self.member_email_edit, self.team_name_edit):
+            w.editingFinished.connect(self._persist_identity)
+        outer.addLayout(form)
+
+        self.team_status = QLabel()
+        self.team_status.setWordWrap(True)
+        self.team_status.setStyleSheet(_HINT)
+        outer.addWidget(self.team_status)
+
+        btns = QHBoxLayout()
+        gen = QPushButton("Generate team key…")
+        gen.setToolTip("Bundle your enabled external database(s) into a shareable key for teammates.")
+        gen.clicked.connect(self._generate_team_key)
+        btns.addWidget(gen)
+        join = QPushButton("Join team (paste key)…")
+        join.clicked.connect(self._join_team)
+        btns.addWidget(join)
+        leave = QPushButton("Leave team")
+        leave.clicked.connect(self._leave_team)
+        btns.addWidget(leave)
+        btns.addStretch()
+        log_btn = QPushButton("Activity log…")
+        log_btn.clicked.connect(self._show_activity_log)
+        btns.addWidget(log_btn)
+        outer.addLayout(btns)
+
+        hint = QLabel(
+            "Anyone with the key joins the same team: their summaries are written to the shared "
+            "database (centralized) and the agent links meetings across the team. Every action "
+            "(create, summary, delete, sync) is recorded with your name and email. The key carries "
+            "DB credentials — share it only with your team."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(_HINT)
+        outer.addWidget(hint)
+        self._update_team_status()
+        return box
+
+    def _update_team_status(self) -> None:
+        if getattr(self, "team_status", None) is None:
+            return
+        if self.team_id:
+            self.team_status.setText(f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database.")
+        else:
+            self.team_status.setText("Not in a team. Generate a key to start one, or paste a key to join.")
 
     @staticmethod
     def _wrap(layout) -> QWidget:
@@ -1321,6 +1387,186 @@ class MainWindow(QWidget):
 
         self._run_async(work, lambda msg, ok: self.ext_sync_status.setText(msg))
 
+    # ----- team & audit -----
+    def _persist_identity(self) -> None:
+        self._display_name = self.member_name_edit.text().strip() or self._display_name
+        self.user = self.member_name_edit.text().strip() or self.user
+        self.user_email = self.member_email_edit.text().strip()
+        self.team_name = self.team_name_edit.text().strip()
+        self.store.set_setting("user_name", self._display_name)
+        self.store.set_setting("user_email", self.user_email)
+        if self.team_name:
+            self.store.set_setting("team.name", self.team_name)
+        self._update_identity_label()
+
+    def _audit(self, action: str, target_id: int | None = None, detail: str | None = None) -> None:
+        """Record who-did-what locally and mirror it to the centralized DB."""
+        try:
+            entry = self.store.log_action(
+                action, self._display_name, self.user_email, self.team_id or None, target_id, detail)
+        except Exception:
+            return
+        cfg = self._current_external_cfg()
+        if cfg.relational.enabled and cfg.relational.url:
+            from . import external
+            self._run_async(lambda: (external.push_audit(entry, cfg) and "") or "", lambda *_: None)
+
+    def _generate_team_key(self) -> None:
+        from . import team
+
+        self._persist_identity()
+        if not self.member_email_edit.text().strip():
+            QMessageBox.warning(self, "Email needed", "Enter your email so the team knows who you are.")
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            QMessageBox.warning(
+                self, "Configure a database first",
+                "Enable and configure an external relational and/or graph database above, then "
+                "generate the key — it bundles those connection settings for your team.")
+            return
+        tid = self.team_id or team.new_team_id()
+        name = self.team_name_edit.text().strip() or "My Team"
+        key = team.make_team_key(name, tid, cfg)
+        self.team_id, self.team_name = tid, name
+        self.store.set_setting("team.id", tid)
+        self.store.set_setting("team.name", name)
+        self._update_team_status()
+        self._audit("team_key_generated", None, name)
+        self._show_key_dialog(key)
+
+    def _show_key_dialog(self, key: str) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Team key — share with your team")
+        v = QVBoxLayout(dlg)
+        lbl = QLabel("Send this key to teammates. They paste it via “Join team”. "
+                     "It contains database credentials — share over a trusted channel only.")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        field = QLineEdit(key)
+        field.setReadOnly(True)
+        v.addWidget(field)
+        row = QHBoxLayout()
+        copy = QPushButton("Copy key")
+        copy.setObjectName("primary")
+        copy.clicked.connect(lambda: (QApplication.clipboard().setText(key), copy.setText("Copied ✓")))
+        row.addWidget(copy)
+        row.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+        dlg.resize(560, 160)
+        dlg.exec()
+
+    def _join_team(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        from . import team
+
+        self._persist_identity()
+        if not self.member_email_edit.text().strip():
+            QMessageBox.warning(self, "Email needed", "Enter your email before joining a team.")
+            return
+        key, ok = QInputDialog.getText(self, "Join team", "Paste the team key:")
+        if not ok or not key.strip():
+            return
+        try:
+            parsed = team.parse_team_key(key)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid key", str(exc))
+            return
+        # Apply the shared external DB config into the widgets (guarded), then enable.
+        ext = parsed["external"]
+        prev, self._loading = self._loading, True
+        try:
+            self.ext_rel_enable.setChecked(ext.relational.enabled)
+            self.ext_rel_url.setText(ext.relational.url)
+            self.ext_rel_user.setText(ext.relational.user)
+            self.ext_rel_pass.setText(ext.relational.password)
+            self.ext_graph_enable.setChecked(ext.graph.enabled)
+            self.ext_graph_store.setText(ext.graph.graph_store_url)
+            self.ext_graph_update.setText(ext.graph.update_url)
+            self.ext_graph_query.setText(ext.graph.query_url)
+            self.ext_graph_name.setText(ext.graph.named_graph)
+            self.ext_graph_user.setText(ext.graph.user)
+            self.ext_graph_pass.setText(ext.graph.password)
+        finally:
+            self._loading = prev
+        self._persist_external()
+        self.team_id, self.team_name = parsed["id"], parsed["team"]
+        self.store.set_setting("team.id", self.team_id)
+        self.store.set_setting("team.name", self.team_name)
+        self._update_team_status()
+        self._audit("team_joined", None, self.team_name)
+        QMessageBox.information(
+            self, "Joined team",
+            f"You're now in “{self.team_name}”. Your meetings will sync to the shared database.")
+
+    def _leave_team(self) -> None:
+        if not self.team_id:
+            return
+        self._audit("team_left", None, self.team_name)
+        self.team_id, self.team_name = "", ""
+        self.store.set_setting("team.id", "")
+        self.store.set_setting("team.name", "")
+        self._update_team_status()
+
+    def _show_activity_log(self) -> None:
+        ActivityLogDialog(self).exec()
+
+    def _crosslink_async(self, meeting_id) -> None:
+        """Let the agent link this meeting to related ones, across the team if centralized."""
+        if meeting_id is None:
+            return
+        cfg = self._current_external_cfg()
+        provider_cfg = {
+            "provider": self.ai_provider.currentData(),
+            "model": self.ai_model.currentText().strip(),
+            "api_key": self.ai_key.text().strip(),
+            "base_url": self.ai_base.text().strip(),
+        }
+        name, email, team_id = self._display_name, self.user_email, self.team_id or None
+
+        def work():
+            import json as _json
+
+            from . import crosslink, external
+
+            rec = self.store.get_meeting(meeting_id)
+            if not rec:
+                return ""
+            try:
+                summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+            except Exception:
+                summary = {}
+            target = crosslink.digest_of(meeting_id, rec.get("title") or "", summary)
+            by_id = {d.id: d for d in crosslink.digests_from_store(self.store, exclude_id=meeting_id)}
+            if cfg.graph.enabled and cfg.graph.query_url:  # team-wide candidates from the shared graph
+                try:
+                    for r in external.GraphSink(cfg.graph).fetch_digests():
+                        if r["id"] != meeting_id and r["id"] not in by_id:
+                            by_id[r["id"]] = crosslink.digest_from_remote(
+                                r["id"], r["title"], r["topics"], r["qids"])
+                except Exception:
+                    pass
+            links = [l.as_dict() for l in crosslink.cross_link(target, list(by_id.values()), provider_cfg)]
+            self.store.set_links(meeting_id, links)
+            rec["links"] = links
+            if cfg.relational.enabled or cfg.graph.enabled:
+                prev = self._prev_meeting_id(meeting_id, rec.get("user"))
+                external.push_meeting(rec, cfg, [prev] if prev else None)
+            try:
+                entry = self.store.log_action("cross_linked", name, email, team_id, meeting_id,
+                                              f"{len(links)} link(s)")
+                if cfg.relational.enabled and cfg.relational.url:
+                    external.push_audit(entry, cfg)
+            except Exception:
+                pass
+            return f"Linked {len(links)} related meeting(s)." if links else "No related meetings found."
+
+        self._run_async(work, lambda msg, ok: msg and self._set_summary_status(msg))
+
     # ----- model prewarming (avoid cold start) -----
     def _maybe_prewarm(self) -> None:
         if self.controller.running:
@@ -1414,6 +1660,11 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             self._push_external_async(self._meeting_id)  # mirror to external DB(s)
+            # When this is the final (post-Stop) summary, record it and let the
+            # agent link this meeting to related ones. (Skipped on live ticks.)
+            if not self.controller.running:
+                self._audit("summary_generated", self._meeting_id)
+                self._crosslink_async(self._meeting_id)
 
     def _on_notes_failed(self, msg: str) -> None:
         self._notes_busy = False
@@ -1566,9 +1817,11 @@ class MainWindow(QWidget):
                 ended_at=datetime.now().isoformat(timespec="seconds"),
                 transcript_md=self.transcript.to_markdown(),
                 transcript_plain=self.transcript.to_plain(),
+                team_id=self.team_id or None,
             )
             self.status_label.setText(f"Saved transcript to local database (#{self._meeting_id}).")
             self._refresh_meetings()
+            self._audit("meeting_saved", self._meeting_id, self.meeting_name or default_title)
             self._push_external_async(self._meeting_id)  # mirror to external DB(s)
         except Exception as exc:
             self.status_label.setText(f"⚠ Could not save to database: {exc}")
@@ -1891,6 +2144,7 @@ class MeetingDetailDialog(QDialog):
 
         self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
         self._transcript_md = rec.get("transcript_md") or "_No transcript._"
+        self._related_md = self._build_related_md(parent, rec.get("id"))
 
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
@@ -1953,13 +2207,33 @@ class MeetingDetailDialog(QDialog):
     def _scope(self) -> str:
         return self.scope_combo.currentData()
 
+    def _build_related_md(self, parent, meeting_id) -> str:
+        """Markdown for the agent-discovered cross-meeting links."""
+        if meeting_id is None:
+            return ""
+        try:
+            links = parent.store.get_links(meeting_id)
+        except Exception:
+            return ""
+        if not links:
+            return ""
+        lines = ["## Related meetings", "", "_Linked automatically by the cross-link agent._", ""]
+        for l in links:
+            rec = parent.store.get_meeting(l["related_id"])
+            title = (rec.get("title") if rec else None) or f"Meeting #{l['related_id']}"
+            rel = (l.get("relation") or "related").replace("_", " ")
+            reason = f" — {l['reason']}" if l.get("reason") else ""
+            lines.append(f"- **{title}** ({rel}){reason}")
+        return "\n".join(lines)
+
     def _current_md(self) -> str:
         scope = self._scope()
+        related = f"\n\n---\n\n{self._related_md}" if self._related_md else ""
         if scope == "summary":
-            return self._summary_md
+            return self._summary_md + related
         if scope == "transcript":
             return f"## Full transcript\n\n{self._transcript_md}"
-        return f"{self._summary_md}\n\n---\n\n## Full transcript\n\n{self._transcript_md}"
+        return f"{self._summary_md}{related}\n\n---\n\n## Full transcript\n\n{self._transcript_md}"
 
     def _update_view(self) -> None:
         self._view.setMarkdown(self._current_md())
@@ -2038,10 +2312,57 @@ class MeetingDetailDialog(QDialog):
             return
         try:
             self._parent.store.delete_meeting(self._mid)
+            self._parent._audit("meeting_deleted", self._mid, self._rec.get("title"))
             self._parent._refresh_meetings()
         except Exception:
             pass
         self.accept()
+
+
+class ActivityLogDialog(QDialog):
+    """Shows the audit log — who did what, when (local; the same entries are
+    mirrored to the centralized DB when a team database is configured)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("MeetGraph — activity log")
+        self.setWindowIcon(app_icon())
+        self.resize(720, 480)
+        v = QVBoxLayout(self)
+        head = QLabel("Activity log")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Every create, summary, delete, link, and sync — with the team member who did it.")
+        sub.setObjectName("HeaderSubtitle")
+        v.addWidget(sub)
+
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["When", "Who", "Email", "Action", "Detail"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hh = table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        try:
+            rows = parent.store.list_audit(limit=1000)
+        except Exception:
+            rows = []
+        table.setRowCount(len(rows))
+        for r, e in enumerate(rows):
+            vals = [
+                (e.get("ts") or "")[:19].replace("T", " "),
+                e.get("actor_name") or "", e.get("actor_email") or "",
+                e.get("action") or "", e.get("detail") or "",
+            ]
+            for c, val in enumerate(vals):
+                table.setItem(r, c, QTableWidgetItem(str(val)))
+        v.addWidget(table, 1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        v.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
 
 
 class WelcomeDialog(QDialog):
@@ -2050,12 +2371,13 @@ class WelcomeDialog(QDialog):
     The name is shown only the first time — once saved it's reused silently.
     """
 
-    def __init__(self, default_name: str = "", ask_name: bool = True):
+    def __init__(self, default_name: str = "", ask_name: bool = True, default_email: str = ""):
         super().__init__()
         self.setWindowTitle("MeetGraph")
         self.setWindowIcon(app_icon())
-        self.resize(460, 420)
+        self.resize(460, 460)
         self.user_name = default_name
+        self.user_email = default_email
         self.meeting_name = ""
         self._ask_name = ask_name
 
@@ -2089,12 +2411,18 @@ class WelcomeDialog(QDialog):
         v.addSpacing(6)
 
         self.name_edit = QLineEdit(default_name)
+        self.email_edit = QLineEdit(default_email)
         if ask_name:
             lbl = QLabel("Your name")
             lbl.setStyleSheet("font-weight:600;")
             v.addWidget(lbl)
             self.name_edit.setPlaceholderText("used to label your speech (e.g. Tek Raj)")
             v.addWidget(self.name_edit)
+            elbl = QLabel("Your email (optional — used for team activity logs)")
+            elbl.setStyleSheet("font-weight:600;")
+            v.addWidget(elbl)
+            self.email_edit.setPlaceholderText("you@example.com")
+            v.addWidget(self.email_edit)
 
         mlbl = QLabel("Meeting name (optional)")
         mlbl.setStyleSheet("font-weight:600;")
@@ -2113,6 +2441,7 @@ class WelcomeDialog(QDialog):
     def _continue(self) -> None:
         if self._ask_name:
             self.user_name = self.name_edit.text().strip()
+            self.user_email = self.email_edit.text().strip()
         self.meeting_name = self.meeting_edit.text().strip()
         self.accept()
 
@@ -2162,18 +2491,22 @@ def run() -> None:
 
     store = Store()
     saved_name = (store.get_setting("user_name") or "").strip()
+    saved_email = (store.get_setting("user_email") or "").strip()
 
     # Show the welcome screen only when we don't yet know the user's name;
     # afterwards the saved name is reused silently. The meeting name is asked
     # each run (it's optional and changes meeting-to-meeting).
-    dlg = WelcomeDialog(default_name=saved_name, ask_name=not saved_name)
+    dlg = WelcomeDialog(default_name=saved_name, ask_name=not saved_name, default_email=saved_email)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return  # closing the welcome screen (X / Esc) exits the app
 
     user_name = saved_name or dlg.user_name
     if dlg.user_name and not saved_name:
         store.set_setting("user_name", dlg.user_name)
+    user_email = saved_email or dlg.user_email
+    if dlg.user_email and not saved_email:
+        store.set_setting("user_email", dlg.user_email)
 
-    win = MainWindow(user_name=user_name, meeting_name=dlg.meeting_name)
+    win = MainWindow(user_name=user_name, meeting_name=dlg.meeting_name, user_email=user_email)
     win.show()
     sys.exit(app.exec())

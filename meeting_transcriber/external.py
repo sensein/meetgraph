@@ -90,7 +90,7 @@ def load_config(get_setting) -> ExternalConfig:
 # Relational sink (SQLAlchemy)
 # --------------------------------------------------------------------------- #
 _MEETING_COLS = [
-    "id", "user", "title", "started_at", "ended_at",
+    "id", "user", "title", "team_id", "started_at", "ended_at",
     "transcript_md", "transcript_plain", "summary_md", "summary_json", "created_at",
 ]
 
@@ -130,11 +130,22 @@ class RelationalSink:
                 "meetgraph_meetings", self._meta,
                 Column("id", BigInteger, primary_key=True),
                 Column("user", Text), Column("title", Text),
+                Column("team_id", Text, index=True),
                 Column("started_at", Text), Column("ended_at", Text),
                 Column("purpose", Text),
                 Column("transcript_md", Text), Column("transcript_plain", Text),
                 Column("summary_md", Text), Column("summary_json", Text),
                 Column("created_at", Text),
+            ),
+            "meeting_links": Table(
+                "meetgraph_meeting_links", self._meta, pk(), fk(),
+                Column("related_id", BigInteger), Column("relation", Text), Column("reason", Text),
+            ),
+            "audit_log": Table(
+                "meetgraph_audit_log", self._meta, pk(),
+                Column("ts", Text), Column("team_id", Text, index=True),
+                Column("actor_name", Text), Column("actor_email", Text),
+                Column("action", Text), Column("target_id", BigInteger), Column("detail", Text),
             ),
             "participants": Table(
                 "meetgraph_participants", self._meta, pk(), fk(), Column("name", Text),
@@ -200,19 +211,33 @@ class RelationalSink:
              "wikipedia": k.get("wikipedia"), "wikidata": k.get("wikidata")}
             for k in (summary.get("key_terms") or [])
         ]
+        link_rows = [
+            {"meeting_id": mid, "related_id": l.get("related_id"),
+             "relation": l.get("relation"), "reason": l.get("reason")}
+            for l in (rec.get("links") or [])
+        ]
 
         t = self._t
         with self._engine.begin() as conn:
             for name in ("participants", "topics", "decisions", "open_questions",
-                         "action_items", "key_terms"):
+                         "action_items", "key_terms", "meeting_links"):
                 conn.execute(delete(t[name]).where(t[name].c.meeting_id == mid))
             conn.execute(delete(t["meetings"]).where(t["meetings"].c.id == mid))
             conn.execute(insert(t["meetings"]).values(**parent))
             for name, rows in (("participants", participants), ("topics", topics),
                                ("decisions", decisions), ("open_questions", questions),
-                               ("action_items", actions), ("key_terms", terms)):
+                               ("action_items", actions), ("key_terms", terms),
+                               ("meeting_links", link_rows)):
                 if rows:
                     conn.execute(insert(t[name]), rows)
+
+    def append_audit(self, entry: dict) -> None:
+        from sqlalchemy import insert
+
+        row = {c: entry.get(c) for c in
+               ("ts", "team_id", "actor_name", "actor_email", "action", "target_id", "detail")}
+        with self._engine.begin() as conn:
+            conn.execute(insert(self._t["audit_log"]).values(**row))
 
     def test(self) -> str:
         from sqlalchemy import text
@@ -253,7 +278,7 @@ class GraphSink:
         sep = "&" if "?" in self.cfg.graph_store_url else "?"
         return f"{self.cfg.graph_store_url}{sep}graph={urllib.parse.quote(self.named_graph)}"
 
-    def push_meeting(self, rec: dict, summary: dict, prev_ids=None) -> None:
+    def push_meeting(self, rec: dict, summary: dict, prev_ids=None, links=None) -> None:
         """Upsert one meeting into the single 'meetgraph' named graph.
 
         With a SPARQL Update endpoint (preferred) we delete just this meeting's
@@ -263,7 +288,7 @@ class GraphSink:
         """
         ng = self.named_graph
         meeting_iri = kg.meeting_iri(rec.get("id"))
-        triples = kg.serialize_meeting(rec, summary, prev_ids, fmt="nt").decode("utf-8")
+        triples = kg.serialize_meeting(rec, summary, prev_ids, fmt="nt", links=links).decode("utf-8")
         if self.cfg.update_url:
             update = (
                 # Drop this meeting + all its sub-resources (topic/term/… IRIs)
@@ -306,6 +331,51 @@ class GraphSink:
         else:
             raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
 
+    def fetch_digests(self) -> list[dict]:
+        """Query the shared graph for every meeting's id/title/topics/entities.
+
+        Used for team-wide cross-link candidate discovery. Best-effort: returns
+        [] if there's no query endpoint or the query fails.
+        """
+        if not self.cfg.query_url:
+            return []
+        ng = self.named_graph
+        query = (
+            "PREFIX mco: <https://tekrajchhetri.com/mco/> "
+            "PREFIX dcterms: <http://purl.org/dc/terms/> "
+            "PREFIX skos: <http://www.w3.org/2004/02/skos/core#> "
+            "PREFIX owl: <http://www.w3.org/2002/07/owl#> "
+            "SELECT ?m ?title "
+            '(GROUP_CONCAT(DISTINCT ?topic; separator="||") AS ?topics) '
+            '(GROUP_CONCAT(DISTINCT STR(?wd); separator="||") AS ?wds) WHERE { '
+            f"GRAPH <{ng}> {{ ?m a mco:Meeting . OPTIONAL {{ ?m dcterms:title ?title }} "
+            "OPTIONAL { ?m mco:has_topic ?t . ?t skos:prefLabel ?topic } "
+            "OPTIONAL { ?m mco:has_key_term ?k . ?k owl:sameAs ?wd } } } GROUP BY ?m ?title"
+        )
+        q = urllib.parse.urlencode({"query": query})
+        url = f"{self.cfg.query_url}{'&' if '?' in self.cfg.query_url else '?'}{q}"
+        headers = {**self._auth_header(), "Accept": "application/sparql-results+json"}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return []
+        out = []
+        prefix = kg.BASE + "meeting/"
+        for b in data.get("results", {}).get("bindings", []):
+            m = b.get("m", {}).get("value", "")
+            if not m.startswith(prefix):
+                continue
+            tail = m[len(prefix):]
+            if not tail.isdigit():
+                continue
+            topics = [s for s in (b.get("topics", {}).get("value", "") or "").split("||") if s]
+            wds = [s for s in (b.get("wds", {}).get("value", "") or "").split("||") if s]
+            out.append({"id": int(tail), "title": b.get("title", {}).get("value", ""),
+                        "topics": topics, "qids": [w.rstrip("/").rsplit("/", 1)[-1] for w in wds]})
+        return out
+
     def test(self) -> str:
         url = self.cfg.query_url or self.cfg.update_url or self.cfg.graph_store_url
         if self.cfg.query_url:
@@ -323,6 +393,20 @@ class GraphSink:
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+def push_audit(entry: dict, cfg: ExternalConfig) -> dict[str, str]:
+    """Mirror one audit-log entry to the centralized relational DB (keep all logs)."""
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            RelationalSink(
+                cfg.relational.url, cfg.relational.user, cfg.relational.password
+            ).append_audit(entry)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
 def push_meeting(rec: dict, cfg: ExternalConfig, prev_ids=None) -> dict[str, str]:
     """Push one meeting to every enabled sink. Returns {sink: 'ok' | error}."""
     results: dict[str, str] = {}
@@ -342,7 +426,7 @@ def push_meeting(rec: dict, cfg: ExternalConfig, prev_ids=None) -> dict[str, str
 
     if cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
         try:
-            GraphSink(cfg.graph).push_meeting(rec, summary, prev_ids)
+            GraphSink(cfg.graph).push_meeting(rec, summary, prev_ids, links=rec.get("links"))
             results["graph"] = "ok"
         except Exception as exc:
             results["graph"] = f"{type(exc).__name__}: {exc}"

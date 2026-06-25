@@ -34,6 +34,7 @@ class Meeting:
     ended_at: str
     summary_md: str | None
     created_at: str
+    team_id: str | None = None
 
 
 class Store:
@@ -78,10 +79,42 @@ class Store:
                     transcript_plain TEXT,
                     summary_md      TEXT,
                     summary_json    TEXT,
-                    created_at      TEXT
+                    created_at      TEXT,
+                    team_id         TEXT
                 )
                 """
             )
+            # Links between meetings discovered by the cross-link agent.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meeting_links (
+                    meeting_id  INTEGER,
+                    related_id  INTEGER,
+                    relation    TEXT,
+                    reason      TEXT,
+                    PRIMARY KEY (meeting_id, related_id)
+                )
+                """
+            )
+            # Audit log — who did what (create/edit/delete/sync), kept for accountability.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts           TEXT,
+                    team_id      TEXT,
+                    actor_name   TEXT,
+                    actor_email  TEXT,
+                    action       TEXT,
+                    target_id    INTEGER,
+                    detail       TEXT
+                )
+                """
+            )
+            # Add team_id to pre-existing databases.
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(meetings)").fetchall()}
+            if "team_id" not in cols:
+                con.execute("ALTER TABLE meetings ADD COLUMN team_id TEXT")
         with self._connect_config() as con:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
@@ -139,17 +172,69 @@ class Store:
         transcript_plain: str,
         summary_md: str | None = None,
         summary_json: str | None = None,
+        team_id: str | None = None,
     ) -> int:
         with self._connect() as con:
             cur = con.execute(
                 """INSERT INTO meetings
                    (user, title, started_at, ended_at, transcript_md,
-                    transcript_plain, summary_md, summary_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    transcript_plain, summary_md, summary_json, created_at, team_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (user, title, started_at, ended_at, transcript_md,
-                 transcript_plain, summary_md, summary_json, datetime.now().isoformat(timespec="seconds")),
+                 transcript_plain, summary_md, summary_json,
+                 datetime.now().isoformat(timespec="seconds"), team_id),
             )
             return int(cur.lastrowid)
+
+    def set_links(self, meeting_id: int, links: list[dict]) -> None:
+        """Replace the cross-meeting links for a meeting. links: {related_id, relation, reason}."""
+        with self._connect() as con:
+            con.execute("DELETE FROM meeting_links WHERE meeting_id = ?", (meeting_id,))
+            con.executemany(
+                "INSERT OR REPLACE INTO meeting_links(meeting_id, related_id, relation, reason) "
+                "VALUES (?, ?, ?, ?)",
+                [(meeting_id, l["related_id"], l.get("relation"), l.get("reason")) for l in links],
+            )
+
+    def get_links(self, meeting_id: int) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT related_id, relation, reason FROM meeting_links WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def log_action(
+        self,
+        action: str,
+        actor_name: str = "",
+        actor_email: str = "",
+        team_id: str | None = None,
+        target_id: int | None = None,
+        detail: str | None = None,
+    ) -> dict:
+        """Append an audit entry (who did what, when) and return it."""
+        entry = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "team_id": team_id, "actor_name": actor_name, "actor_email": actor_email,
+            "action": action, "target_id": target_id, "detail": detail,
+        }
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO audit_log(ts, team_id, actor_name, actor_email, action, target_id, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entry["ts"], team_id, actor_name, actor_email, action, target_id, detail),
+            )
+        return entry
+
+    def list_audit(self, limit: int = 500) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT ts, team_id, actor_name, actor_email, action, target_id, detail "
+                "FROM audit_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def update_summary(self, meeting_id: int, summary_md: str, summary_json: str) -> None:
         with self._connect() as con:
@@ -158,7 +243,7 @@ class Store:
                 (summary_md, summary_json, meeting_id),
             )
 
-    _LIST_COLS = "id, user, title, started_at, ended_at, summary_md, created_at"
+    _LIST_COLS = "id, user, title, started_at, ended_at, summary_md, created_at, team_id"
 
     def list_meetings(self, user: str | None = None, limit: int = 200) -> list[Meeting]:
         q = f"SELECT {self._LIST_COLS} FROM meetings"

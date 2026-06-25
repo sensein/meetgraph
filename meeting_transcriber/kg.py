@@ -32,6 +32,10 @@ MCO = "https://tekrajchhetri.com/mco/"            # ontology terms
 BASE = "https://tekrajchhetri.com/meetgraph/"      # instance data
 MEETGRAPH_NG = "https://tekrajchhetri.com/meetgraph"  # the "meetgraph" named graph
 
+
+def team_iri(team_id) -> str:
+    return f"{BASE}team/{team_id}"
+
 RDF_TYPE = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
 RDFS_LABEL = NamedNode("http://www.w3.org/2000/01/rdf-schema#label")
 RDFS_SEEALSO = NamedNode("http://www.w3.org/2000/01/rdf-schema#seeAlso")
@@ -48,6 +52,10 @@ DCT_DATE = NamedNode("http://purl.org/dc/terms/date")
 PROV_ASSOCIATED = NamedNode("http://www.w3.org/ns/prov#wasAssociatedWith")
 PROV_ATTRIBUTED = NamedNode("http://www.w3.org/ns/prov#wasAttributedTo")
 PROV_INFORMEDBY = NamedNode("http://www.w3.org/ns/prov#wasInformedBy")
+SCHEMA_ISPARTOF = NamedNode("http://schema.org/isPartOf")
+SKOS_RELATED = NamedNode("http://www.w3.org/2004/02/skos/core#related")
+DCT_RELATION = NamedNode("http://purl.org/dc/terms/relation")
+RDFS_COMMENT = NamedNode("http://www.w3.org/2000/01/rdf-schema#comment")
 SCHEMA_AGENT = NamedNode("http://schema.org/agent")
 ICAL_DUE = NamedNode("http://www.w3.org/2002/12/cal/ical#due")
 XSD_DATETIME = NamedNode("http://www.w3.org/2001/XMLSchema#dateTime")
@@ -61,6 +69,16 @@ C_ACTION = NamedNode(MCO + "ActionItem")
 C_QUESTION = NamedNode(MCO + "OpenQuestion")
 C_KEYTERM = NamedNode(MCO + "KeyTerm")
 C_AGENT = NamedNode(MCO + "Agent")
+C_TEAM = NamedNode(MCO + "Team")
+P_RELATED_MEETING = NamedNode(MCO + "relatedMeeting")
+# Relation type -> RDF predicate for cross-meeting links.
+_LINK_PREDICATE = {
+    "follow_up": PROV_INFORMEDBY,
+    "continues": PROV_INFORMEDBY,
+    "depends_on": NamedNode("http://www.w3.org/ns/prov#wasInfluencedBy"),
+    "supersedes": NamedNode("http://purl.org/dc/terms/replaces"),
+    "related": SKOS_RELATED,
+}
 P_HAS_TOPIC = NamedNode(MCO + "has_topic")
 P_HAS_DECISION = NamedNode(MCO + "has_decision")
 P_HAS_ACTION = NamedNode(MCO + "has_action_item")
@@ -124,6 +142,7 @@ def quads_for_meeting(
     summary: dict,
     prev_ids: Iterable[int] | None = None,
     graph=None,
+    links: Iterable[dict] | None = None,
 ) -> Iterator[Quad]:
     """Yield the RDF quads describing one meeting.
 
@@ -250,9 +269,26 @@ def quads_for_meeting(
             yield q(node, OWL_SAMEAS, NamedNode(kt["wikidata"]))
         yield q(m, P_HAS_KEYTERM, node)
 
+    # Team membership (centralized, shared knowledge graph)
+    team_id = rec.get("team_id")
+    if team_id:
+        team = NamedNode(team_iri(team_id))
+        yield q(team, RDF_TYPE, C_TEAM)
+        yield q(m, SCHEMA_ISPARTOF, team)
+
     # Previous meetings in the series
     for pid in prev_ids or []:
         yield q(m, PROV_INFORMEDBY, NamedNode(meeting_iri(pid)))
+
+    # Cross-meeting links discovered by the agent
+    for link in links or []:
+        rid = link.get("related_id")
+        if rid is None:
+            continue
+        other = NamedNode(meeting_iri(rid))
+        pred = _LINK_PREDICATE.get(link.get("relation"), SKOS_RELATED)
+        yield q(m, pred, other)
+        yield q(m, P_RELATED_MEETING, other)  # generic link too, for easy querying
 
 
 def _dump(store: Store, fmt: str, from_graph=None) -> bytes:
@@ -265,10 +301,10 @@ def _dump(store: Store, fmt: str, from_graph=None) -> bytes:
     return buf.getvalue()
 
 
-def serialize_meeting(rec: dict, summary: dict, prev_ids=None, fmt: str = "jsonld") -> bytes:
+def serialize_meeting(rec: dict, summary: dict, prev_ids=None, fmt: str = "jsonld", links=None) -> bytes:
     """Build an in-memory graph for one meeting and serialize it."""
     store = Store()
-    store.extend(list(quads_for_meeting(rec, summary, prev_ids, graph=None)))
+    store.extend(list(quads_for_meeting(rec, summary, prev_ids, graph=None, links=links)))
     return _dump(store, fmt, from_graph=DefaultGraph())
 
 
@@ -291,7 +327,8 @@ def serialize_corpus(records: list[dict], fmt: str = "jsonld") -> bytes:
             summary = {}
         user = rec.get("user") or ""
         prev = prev_by_user.get(user)
-        store.extend(list(quads_for_meeting(rec, summary, [prev] if prev else None, graph=None)))
+        store.extend(list(quads_for_meeting(
+            rec, summary, [prev] if prev else None, graph=None, links=rec.get("links"))))
         prev_by_user[user] = rec.get("id")
     return _dump(store, fmt, from_graph=DefaultGraph())
 
@@ -302,10 +339,10 @@ class MeetingGraph:
     def __init__(self, path: str | None = None):
         self.store = Store(path) if path else Store()
 
-    def ingest(self, rec: dict, summary: dict, prev_ids=None) -> None:
+    def ingest(self, rec: dict, summary: dict, prev_ids=None, links=None) -> None:
         g = NamedNode(meeting_iri(rec.get("id")))
         self.store.remove_graph(g)  # idempotent re-ingest (summaries get updated)
-        self.store.extend(list(quads_for_meeting(rec, summary, prev_ids, graph=g)))
+        self.store.extend(list(quads_for_meeting(rec, summary, prev_ids, graph=g, links=links)))
 
     def export_meeting(self, meeting_id, fmt: str = "jsonld") -> bytes:
         return _dump(self.store, fmt, from_graph=NamedNode(meeting_iri(meeting_id)))

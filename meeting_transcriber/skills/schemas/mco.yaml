@@ -85,6 +85,8 @@ classes:
       - has_open_question
       - has_key_term
       - previous_meeting
+      - related_meeting
+      - part_of_team
 
   Topic:
     is_a: NamedThing
@@ -157,6 +159,20 @@ classes:
       - gloss
       - wikipedia
       - wikidata
+
+  Team:
+    is_a: NamedThing
+    description: >-
+      A team whose meetings share one centralized knowledge graph. Meetings are
+      tied to a team via `part_of_team`, so a team's recurring discussions, key
+      terms, and decisions accumulate in one place.
+    broad_mappings:
+      - prov:Organization
+      - foaf:Group
+    close_mappings:
+      - schema:Organization
+    slots:
+      - name
 
   Transcript:
     is_a: NamedThing
@@ -251,6 +267,19 @@ slots:
     description: >-
       Earlier meeting(s) in the same series that this one follows or continues.
       A reference to other Meeting records (by id), not an embedded copy.
+  related_meeting:
+    close_mappings: [skos:related, dcterms:relation]
+    range: Meeting
+    multivalued: true
+    description: >-
+      Other meeting(s) this one is related to, discovered automatically by the
+      cross-link agent (shared topics/entities, follow-ups, continuations).
+  part_of_team:
+    slot_uri: schema:isPartOf
+    exact_mappings: [schema:isPartOf]
+    close_mappings: [dcterms:isPartOf]
+    range: Team
+    description: The team whose centralized graph this meeting belongs to.
   has_topic:
     close_mappings: [dcterms:hasPart]
     range: Topic
