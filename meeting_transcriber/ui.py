@@ -570,7 +570,7 @@ class MainWindow(QWidget):
         title_col.setSpacing(1)
         title = QLabel("MeetGraph")
         title.setObjectName("HeaderTitle")
-        subtitle = QLabel("Turning meetings into a knowledge graph…")
+        subtitle = QLabel("Turning meetings into a knowledge graph")
         subtitle.setObjectName("HeaderSubtitle")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
@@ -1197,14 +1197,8 @@ class MeetingDetailDialog(QDialog):
         self.setWindowIcon(app_icon())
         self.resize(780, 700)
 
-        parts = []
-        if rec.get("summary_md"):
-            parts.append(rec["summary_md"])
-        else:
-            parts.append(f"# {title}\n\n_No summary was generated._")
-        parts.append("\n\n---\n\n## Full transcript\n\n")
-        parts.append(rec.get("transcript_md") or "_No transcript._")
-        self._md = "".join(parts)
+        self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
+        self._transcript_md = rec.get("transcript_md") or "_No transcript._"
 
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
@@ -1218,17 +1212,29 @@ class MeetingDetailDialog(QDialog):
         sub.setObjectName("HeaderSubtitle")
         v.addWidget(sub)
 
-        view = QTextEdit()
-        view.setObjectName("transcript")
-        view.setReadOnly(True)
-        view.setFont(QFont("SF Pro Text", 13))
-        view.setMarkdown(self._md)
-        v.addWidget(view, 1)
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(8)
+        scope_row.addWidget(QLabel("Include:"))
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItem("Summary + transcript", "both")
+        self.scope_combo.addItem("Summary only", "summary")
+        self.scope_combo.addItem("Transcript only", "transcript")
+        self.scope_combo.currentIndexChanged.connect(self._update_view)
+        scope_row.addWidget(self.scope_combo)
+        scope_row.addStretch()
+        v.addLayout(scope_row)
+
+        self._view = QTextEdit()
+        self._view.setObjectName("transcript")
+        self._view.setReadOnly(True)
+        self._view.setFont(QFont("SF Pro Text", 13))
+        v.addWidget(self._view, 1)
+        self._update_view()
 
         row = QHBoxLayout()
         row.setSpacing(8)
         copy = QPushButton("Copy")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self._md))
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self._current_md()))
         row.addWidget(copy)
         exp = QPushButton("Export .md")
         exp.setObjectName("primary")
@@ -1247,17 +1253,35 @@ class MeetingDetailDialog(QDialog):
         row.addWidget(close)
         v.addLayout(row)
 
+    def _scope(self) -> str:
+        return self.scope_combo.currentData()
+
+    def _current_md(self) -> str:
+        scope = self._scope()
+        if scope == "summary":
+            return self._summary_md
+        if scope == "transcript":
+            return f"## Full transcript\n\n{self._transcript_md}"
+        return f"{self._summary_md}\n\n---\n\n## Full transcript\n\n{self._transcript_md}"
+
+    def _update_view(self) -> None:
+        self._view.setMarkdown(self._current_md())
+
     def _export(self) -> str | None:
+        scope = self._scope()
+        suffix = {"summary": "-summary", "transcript": "-transcript"}.get(scope, "")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export meeting", f"meetgraph-{datetime.now():%Y%m%d-%H%M}.md", "Markdown (*.md)"
+            self, "Export meeting",
+            f"meetgraph-{datetime.now():%Y%m%d-%H%M}{suffix}.md", "Markdown (*.md)"
         )
         if not path:
             return None
         if not path.endswith(".md"):
             path += ".md"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(self._md)
-        if self._json:
+            f.write(self._current_md())
+        # JSON only makes sense when the summary is included.
+        if self._json and scope != "transcript":
             with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
                 f.write(self._json)
         return path
