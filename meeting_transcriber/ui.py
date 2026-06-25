@@ -251,6 +251,7 @@ class MainWindow(QWidget):
         self._summary_dirty = False   # new speech since last summary
         self._notes_busy = False      # a summary generation is in flight
         self._processing: set = set()  # (meeting_id, stage) currently being enriched
+        self._open_details: dict = {}  # meeting_id -> open MeetingDetailDialog (for live refresh)
         self._loading = True  # suppress config saves while widgets are built/loaded
 
         self._build_ui()
@@ -565,7 +566,17 @@ class MainWindow(QWidget):
         if not rec:
             QMessageBox.information(self, "Not found", "Meeting not found.")
             return
-        MeetingDetailDialog(self, rec).exec()
+        dlg = MeetingDetailDialog(self, rec)
+        self._open_details[mid] = dlg          # register for live refresh while enriching
+        try:
+            dlg.exec()
+        finally:
+            self._open_details.pop(mid, None)
+
+    def _refresh_open_detail(self, meeting_id) -> None:
+        dlg = self._open_details.get(meeting_id)
+        if dlg is not None:
+            dlg.reload()
 
     def _bulk_send(self) -> None:
         """Bulk send/sync the meetings currently shown in the Summary table."""
@@ -2250,6 +2261,7 @@ class MainWindow(QWidget):
             self._processing.discard(key)
             self._update_proc_status()
             self._refresh_meetings()  # reflect the new status in the table
+            self._refresh_open_detail(meeting_id)  # live-update an open detail window
 
         if stage == "crosslink":
             self._crosslink_async(meeting_id, on_finish=finish)
@@ -3060,6 +3072,21 @@ class MeetingDetailDialog(QDialog):
 
     def _scope(self) -> str:
         return self.scope_combo.currentData()
+
+    def reload(self) -> None:
+        """Re-load this meeting from the local store (after background enrichment)."""
+        if self._remote or self._mid is None:
+            return
+        rec = self._parent.store.get_meeting(self._mid)
+        if not rec:
+            return
+        self._rec = rec
+        self._json = rec.get("summary_json") or ""
+        title = rec.get("title") or "Meeting"
+        self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
+        self._transcript_md = rec.get("transcript_md") or "_No transcript._"
+        self._related_md = self._build_related_md(self._parent, self._mid)
+        self._update_view()
 
     def _build_related_md(self, parent, meeting_id) -> str:
         """Markdown for the agent-discovered cross-meeting links."""
