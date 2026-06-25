@@ -23,12 +23,9 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSplitter,
     QStackedWidget,
     QTabWidget,
     QTextEdit,
@@ -224,8 +221,10 @@ class MainWindow(QWidget):
         self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
-        self._last_summary_md = ""
+        self._last_summary_md = ""    # the live/current meeting's summary
         self._last_summary_json = ""
+        self._view_md = ""            # what's currently shown (current or a past meeting)
+        self._view_json = ""
         self._loading = True  # suppress config saves while widgets are built/loaded
 
         self._build_ui()
@@ -244,7 +243,6 @@ class MainWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_record_tab(), "  ◉  Record  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
-        self.tabs.addTab(self._build_history_tab(), "  🗂  History  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
@@ -270,6 +268,11 @@ class MainWindow(QWidget):
         self.start_btn.setObjectName("primary")
         self.start_btn.clicked.connect(self._on_start)
         ctrl_row.addWidget(self.start_btn)
+
+        self.pause_btn = QPushButton("❚❚ Pause")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self._on_pause_resume)
+        ctrl_row.addWidget(self.pause_btn)
 
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setObjectName("danger")
@@ -323,7 +326,7 @@ class MainWindow(QWidget):
         row.addStretch()
         self.sum_copy_btn = QPushButton("Copy")
         self.sum_copy_btn.clicked.connect(
-            lambda: QApplication.clipboard().setText(self._last_summary_md)
+            lambda: QApplication.clipboard().setText(self._view_md)
         )
         row.addWidget(self.sum_copy_btn)
         self.sum_save_btn = QPushButton("Save .md + .json")
@@ -334,6 +337,20 @@ class MainWindow(QWidget):
         row.addWidget(self.sum_share_btn)
         v.addLayout(row)
 
+        # Browse the current meeting or any past meeting's summary.
+        browse = QHBoxLayout()
+        browse.setSpacing(8)
+        browse.addWidget(QLabel("Showing:"))
+        self.past_combo = QComboBox()
+        self.past_combo.setMinimumWidth(320)
+        self.past_combo.currentIndexChanged.connect(self._on_past_selected)
+        browse.addWidget(self.past_combo, 1)
+        self.past_delete_btn = QPushButton("Delete")
+        self.past_delete_btn.setObjectName("danger")
+        self.past_delete_btn.clicked.connect(self._delete_selected_past)
+        browse.addWidget(self.past_delete_btn)
+        v.addLayout(browse)
+
         self.summary_view = QTextEdit()
         self.summary_view.setObjectName("transcript")
         self.summary_view.setReadOnly(True)
@@ -341,7 +358,7 @@ class MainWindow(QWidget):
         self.summary_view.setPlaceholderText(
             "The live meeting summary (topics · decisions · open questions · action items) "
             "appears here. It auto-generates when you Stop, or click Generate / refresh "
-            "anytime during the meeting."
+            "anytime during the meeting. Use “Showing” to view past meetings."
         )
         v.addWidget(self.summary_view, 1)
 
@@ -349,114 +366,66 @@ class MainWindow(QWidget):
         self._summary_timer = QTimer(self)
         self._summary_timer.setInterval(60_000)
         self._summary_timer.timeout.connect(self._on_summary_tick)
-        return page
-
-    def _build_history_tab(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("RecordPage")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(2, 10, 2, 2)
-        v.setSpacing(10)
-
-        search_row = QHBoxLayout()
-        search_row.setSpacing(8)
-        self.history_search = QLineEdit()
-        self.history_search.setPlaceholderText("🔎  Search meetings — title, transcript, or notes…")
-        self.history_search.setClearButtonEnabled(True)
-        self.history_search.textChanged.connect(self._refresh_history)
-        search_row.addWidget(self.history_search, 1)
-        refresh = QPushButton("↻ Refresh")
-        refresh.clicked.connect(self._refresh_history)
-        search_row.addWidget(refresh)
-        self.history_delete_btn = QPushButton("Delete")
-        self.history_delete_btn.setObjectName("danger")
-        self.history_delete_btn.clicked.connect(self._delete_selected_meeting)
-        search_row.addWidget(self.history_delete_btn)
-        v.addLayout(search_row)
-
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        self.history_list = QListWidget()
-        self.history_list.setMinimumWidth(260)
-        self.history_list.setStyleSheet(
-            "QListWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:6px;}"
-            "QListWidget::item{padding:8px;border-radius:7px;}"
-            "QListWidget::item:selected{background:#2563eb;color:#ffffff;}"
-        )
-        self.history_list.currentItemChanged.connect(self._on_history_select)
-        split.addWidget(self.history_list)
-
-        self.history_view = QTextEdit()
-        self.history_view.setObjectName("transcript")
-        self.history_view.setReadOnly(True)
-        self.history_view.setFont(QFont("SF Pro Text", 13))
-        self.history_view.setPlaceholderText("Select a meeting to view its summary and full transcript.")
-        split.addWidget(self.history_view)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setSizes([300, 620])
-        v.addWidget(split, 1)
-
-        self.history_count = QLabel("")
-        self.history_count.setStyleSheet("color:#64748b; font-size:12px;")
-        v.addWidget(self.history_count)
+        self._refresh_past()
         return page
 
     def _on_tab_changed(self, index: int) -> None:
-        if self.tabs.tabText(index).strip().endswith("History"):
-            self._refresh_history()
+        if self.tabs.tabText(index).strip().endswith("Summary"):
+            self._refresh_past()
 
-    def _refresh_history(self) -> None:
-        query = self.history_search.text() if hasattr(self, "history_search") else ""
-        try:
-            meetings = self.store.search_meetings(query)
-        except Exception as exc:
-            self.history_count.setText(f"⚠ {exc}")
+    # ----- browse current + past meetings in the Summary tab -----
+    def _refresh_past(self) -> None:
+        if not hasattr(self, "past_combo"):
             return
-        self.history_list.blockSignals(True)
-        self.history_list.clear()
+        keep = self.past_combo.currentData() if self.past_combo.count() else 0
+        self.past_combo.blockSignals(True)
+        self.past_combo.clear()
+        self.past_combo.addItem("● Current meeting (live)", 0)
+        try:
+            meetings = self.store.list_meetings()
+        except Exception:
+            meetings = []
         for m in meetings:
             when = (m.started_at or m.created_at or "")[:16].replace("T", " ")
-            badge = "✦" if m.summary_md else "·"
-            item = QListWidgetItem(f"{badge}  {m.title}\n     {when}   ·   {m.user}")
-            item.setData(Qt.ItemDataRole.UserRole, m.id)
-            self.history_list.addItem(item)
-        self.history_list.blockSignals(False)
-        self.history_count.setText(
-            f"{len(meetings)} meeting(s)" + (f" matching “{query}”" if query.strip() else "")
-        )
+            mark = "✦" if m.summary_md else "·"
+            self.past_combo.addItem(f"{mark}  {m.title}   ·   {when}   ·   {m.user}", m.id)
+        i = self.past_combo.findData(keep)
+        self.past_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.past_combo.blockSignals(False)
 
-    def _on_history_select(self, current, _previous=None) -> None:
-        if current is None:
-            self.history_view.clear()
+    def _on_past_selected(self) -> None:
+        mid = self.past_combo.currentData()
+        if not mid:  # 0 / None -> current live meeting
+            self._view_md, self._view_json = self._last_summary_md, self._last_summary_json
+            self.summary_view.setMarkdown(self._last_summary_md or "")
             return
-        mid = current.data(Qt.ItemDataRole.UserRole)
         rec = self.store.get_meeting(mid)
         if not rec:
-            self.history_view.setMarkdown("_Meeting not found._")
+            self.summary_view.setMarkdown("_Meeting not found._")
             return
         parts = []
         if rec.get("summary_md"):
             parts.append(rec["summary_md"])
-            parts.append("\n\n---\n\n")
         else:
-            parts.append(f"# {rec.get('title') or 'Meeting'}\n\n_No summary was generated._\n\n---\n\n")
-        parts.append("## Full transcript\n\n")
+            parts.append(f"# {rec.get('title') or 'Meeting'}\n\n_No summary was generated._")
+        parts.append("\n\n---\n\n## Full transcript\n\n")
         parts.append(rec.get("transcript_md") or "_No transcript._")
-        self.history_view.setMarkdown("".join(parts))
+        self._view_md = "".join(parts)
+        self._view_json = rec.get("summary_json") or ""
+        self.summary_view.setMarkdown(self._view_md)
 
-    def _delete_selected_meeting(self) -> None:
-        item = self.history_list.currentItem()
-        if item is None:
+    def _delete_selected_past(self) -> None:
+        mid = self.past_combo.currentData()
+        if not mid:
+            QMessageBox.information(self, "Delete", "Select a past meeting to delete.")
             return
-        mid = item.data(Qt.ItemDataRole.UserRole)
         if QMessageBox.question(
             self, "Delete meeting", "Delete this meeting from the local database? This cannot be undone."
         ) != QMessageBox.StandardButton.Yes:
             return
         self.store.delete_meeting(mid)
-        self.history_view.clear()
-        self._refresh_history()
+        self._refresh_past()
+        self._on_past_selected()
 
     def _build_config_tab(self) -> QWidget:
         page = QWidget()
@@ -594,23 +563,22 @@ class MainWindow(QWidget):
 
         self.live_badge = QLabel("Idle")
         self.live_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._set_badge(False)
+        self._set_badge("idle")
         row.addWidget(self.live_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         return row
 
-    def _set_badge(self, live: bool) -> None:
-        if live:
-            self.live_badge.setText("● Recording")
-            self.live_badge.setStyleSheet(
-                "background:#fef2f2; color:#dc2626; border:1px solid #fca5a5;"
-                "border-radius:11px; padding:4px 12px; font-weight:700; font-size:12px;"
-            )
-        else:
-            self.live_badge.setText("● Idle")
-            self.live_badge.setStyleSheet(
-                "background:#f1f5f9; color:#64748b; border:1px solid #e2e8f0;"
-                "border-radius:11px; padding:4px 12px; font-weight:700; font-size:12px;"
-            )
+    def _set_badge(self, state: str) -> None:
+        styles = {
+            "recording": ("● Recording", "#fef2f2", "#dc2626", "#fca5a5"),
+            "paused": ("❚❚ Paused", "#fffbeb", "#b45309", "#fcd34d"),
+            "idle": ("● Idle", "#f1f5f9", "#64748b", "#e2e8f0"),
+        }
+        text, bg, fg, border = styles.get(state, styles["idle"])
+        self.live_badge.setText(text)
+        self.live_badge.setStyleSheet(
+            f"background:{bg}; color:{fg}; border:1px solid {border};"
+            "border-radius:11px; padding:4px 12px; font-weight:700; font-size:12px;"
+        )
 
     def _update_identity_label(self) -> None:
         self.identity_label.setText(f"👤 {self._display_name}")
@@ -842,15 +810,18 @@ class MainWindow(QWidget):
     def _on_notes_done(self, markdown: str, json_text: str) -> None:
         self._last_summary_md = markdown
         self._last_summary_json = json_text
-        self.summary_view.setMarkdown(markdown)
         self.summary_btn.setEnabled(True)
         self._set_summary_status(f"Summary updated · {datetime.now():%H:%M:%S}")
-        self.tabs.setCurrentWidget(self.summary_view.parentWidget())
+        # If we're viewing the current (live) meeting, update the view too.
+        if not self.past_combo.currentData():
+            self._view_md, self._view_json = markdown, json_text
+            self.summary_view.setMarkdown(markdown)
+        self.tabs.setCurrentIndex(1)  # Summary tab
         # Persist to the local database (update the row for this meeting).
         if self._meeting_id is not None:
             try:
                 self.store.update_summary(self._meeting_id, markdown, json_text)
-                self._refresh_history()
+                self._refresh_past()
             except Exception:
                 pass
 
@@ -864,7 +835,7 @@ class MainWindow(QWidget):
         self.status_label.setText(msg)
 
     def _save_summary(self) -> str | None:
-        if not self._last_summary_md:
+        if not self._view_md:
             QMessageBox.information(self, "Nothing to save", "Generate the summary first.")
             return None
         path, _ = QFileDialog.getSaveFileName(
@@ -875,10 +846,10 @@ class MainWindow(QWidget):
         if not path.endswith(".md"):
             path += ".md"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(self._last_summary_md)
-        if self._last_summary_json:
+            f.write(self._view_md)
+        if self._view_json:
             with open(path[:-3] + ".json", "w", encoding="utf-8") as f:
-                f.write(self._last_summary_json)
+                f.write(self._view_json)
         self._set_summary_status(f"Saved → {path}")
         return path
 
@@ -909,6 +880,7 @@ class MainWindow(QWidget):
         self.controller.new_text.connect(self._on_new_text)
         self.controller.status.connect(self.status_label.setText)
         self.controller.started.connect(self._on_started)
+        self.controller.paused.connect(self._on_paused)
         self.controller.stopped.connect(self._on_stopped)
         self.controller.error.connect(self._on_error)
 
@@ -946,22 +918,47 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Missing key", "Enter your OpenAI API key.")
             return
 
-        self._started_at = datetime.now()
+        # Start always begins a NEW meeting — clear the previous transcript & summary.
+        self.transcript.clear()
+        self.transcript_view.clear()
+        self.summary_view.clear()
+        self._last_summary_md = ""
+        self._last_summary_json = ""
+        self._view_md = ""
+        self._view_json = ""
         self._meeting_id = None
+
+        self._started_at = datetime.now()
         self.transcript.started_at = self._started_at
         self.start_btn.setEnabled(False)
         self.controller.start(config, sources)
 
-    def _on_started(self) -> None:
+    def _on_pause_resume(self) -> None:
+        if self.controller.is_paused:
+            self.controller.resume()
+        else:
+            self.controller.pause()
+
+    def _on_started(self) -> None:  # fired on start and on resume
+        self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self._set_badge(True)
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText("❚❚ Pause")
+        self._set_badge("recording")
         self._set_settings_enabled(False)
         self._summary_timer.start()  # drives optional live auto-refresh
+
+    def _on_paused(self) -> None:
+        self.pause_btn.setText("▶ Resume")
+        self._set_badge("paused")
+        self._summary_timer.stop()
 
     def _on_stopped(self) -> None:
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self._set_badge(False)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setText("❚❚ Pause")
+        self._set_badge("idle")
         self._set_settings_enabled(True)
         self._summary_timer.stop()
         self._persist_meeting()
@@ -982,7 +979,7 @@ class MainWindow(QWidget):
                 transcript_plain=self.transcript.to_plain(),
             )
             self.status_label.setText(f"Saved transcript to local database (#{self._meeting_id}).")
-            self._refresh_history()
+            self._refresh_past()
         except Exception as exc:
             self.status_label.setText(f"⚠ Could not save to database: {exc}")
 
