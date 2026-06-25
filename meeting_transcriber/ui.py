@@ -401,6 +401,11 @@ class MainWindow(QWidget):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._refresh_meetings)
         srow.addWidget(self.search_edit, 1)
+        self.team_feed_check = QCheckBox("Team meetings (shared DB)")
+        self.team_feed_check.setToolTip("Show all of your team's meetings read from the shared "
+                                        "database, not just the ones on this machine.")
+        self.team_feed_check.toggled.connect(self._refresh_meetings)
+        srow.addWidget(self.team_feed_check)
         refresh = QPushButton("↻ Refresh")
         refresh.clicked.connect(self._refresh_meetings)
         srow.addWidget(refresh)
@@ -460,34 +465,76 @@ class MainWindow(QWidget):
     def _refresh_meetings(self) -> None:
         if not hasattr(self, "meetings_table"):
             return
-        query = self.search_edit.text() if hasattr(self, "search_edit") else ""
-        try:
-            meetings = self.store.search_meetings(query)
-        except Exception as exc:
-            self.meetings_count.setText(f"⚠ {exc}")
-            return
+        query = (self.search_edit.text() if hasattr(self, "search_edit") else "").strip().lower()
+        team_mode = hasattr(self, "team_feed_check") and self.team_feed_check.isChecked()
+        self._team_feed = team_mode
+
+        if team_mode:
+            rows, note = self._fetch_team_meetings(query)
+            if rows is None:  # not available
+                self.meetings_table.setRowCount(0)
+                self.meetings_count.setText(note)
+                return
+        else:
+            try:
+                meetings = self.store.search_meetings(query)
+            except Exception as exc:
+                self.meetings_count.setText(f"⚠ {exc}")
+                return
+            rows = [{"id": m.id, "title": m.title, "user": m.user,
+                     "started_at": m.started_at, "created_at": m.created_at,
+                     "summary_md": m.summary_md} for m in meetings]
+            note = None
+
         self.meetings_table.setSortingEnabled(False)
         self.meetings_table.setRowCount(0)
-        for m in meetings:
+        for m in rows:
             r = self.meetings_table.rowCount()
             self.meetings_table.insertRow(r)
-            when = (m.started_at or m.created_at or "")[:16].replace("T", " ")
-            title_item = QTableWidgetItem(m.title or "Meeting")
-            title_item.setData(Qt.ItemDataRole.UserRole, m.id)
+            when = (m.get("started_at") or m.get("created_at") or "")[:16].replace("T", " ")
+            title_item = QTableWidgetItem(m.get("title") or "Meeting")
+            title_item.setData(Qt.ItemDataRole.UserRole, m.get("id"))
             self.meetings_table.setItem(r, 0, title_item)
             self.meetings_table.setItem(r, 1, QTableWidgetItem(when))
-            self.meetings_table.setItem(r, 2, QTableWidgetItem(m.user or ""))
-            self.meetings_table.setItem(r, 3, QTableWidgetItem("✦ yes" if m.summary_md else "—"))
+            self.meetings_table.setItem(r, 2, QTableWidgetItem(m.get("user") or ""))
+            self.meetings_table.setItem(r, 3, QTableWidgetItem("✦ yes" if m.get("summary_md") else "—"))
         self.meetings_table.setSortingEnabled(True)
+        scope = "team (shared DB)" if team_mode else "local"
         self.meetings_count.setText(
-            (f"{len(meetings)} meeting(s)" + (f" matching “{query.strip()}”" if query.strip() else ""))
-            + " · click a row to open"
-        )
+            note or (f"{len(rows)} {scope} meeting(s)"
+                     + (f" matching “{query}”" if query else "") + " · click a row to open"))
+
+    def _fetch_team_meetings(self, query: str):
+        """Return (rows, note). rows=None means the shared DB isn't available."""
+        cfg = self._current_external_cfg().relational
+        if not (cfg.enabled and cfg.url):
+            return None, "Enable a relational shared database in Configuration to see team meetings."
+        try:
+            from .external import RelationalSink
+            rows = RelationalSink(cfg.url, cfg.user, cfg.password).list_meetings(
+                team_id=self.team_id or None)
+        except Exception as exc:
+            return None, f"⚠ Shared DB: {exc}"
+        if query:
+            rows = [r for r in rows if query in (r.get("title") or "").lower()
+                    or query in (r.get("summary_md") or "").lower()]
+        return rows, None
 
     def _open_meeting_detail(self, row: int, _col: int = 0) -> None:
         cell = self.meetings_table.item(row, 0)
         mid = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         if mid is None:
+            return
+        if getattr(self, "_team_feed", False):
+            cfg = self._current_external_cfg().relational
+            try:
+                from .external import RelationalSink
+                rec = RelationalSink(cfg.url, cfg.user, cfg.password).get_meeting(mid)
+            except Exception as exc:
+                QMessageBox.warning(self, "Shared DB", f"Could not load meeting: {exc}")
+                return
+            if rec:
+                MeetingDetailDialog(self, rec, remote=True).exec()
             return
         rec = self.store.get_meeting(mid)
         if not rec:
@@ -2634,20 +2681,22 @@ def _escape(text: str) -> str:
 class MeetingDetailDialog(QDialog):
     """A meeting's summary + full transcript in its own window, with actions."""
 
-    def __init__(self, parent, rec: dict):
+    def __init__(self, parent, rec: dict, remote: bool = False):
         super().__init__(parent)
         self._parent = parent
         self._rec = rec
+        self._remote = remote
         self._mid = rec.get("id")
         self._json = rec.get("summary_json") or ""
         title = rec.get("title") or "Meeting"
-        self.setWindowTitle(f"MeetGraph — {title}")
+        self.setWindowTitle(f"MeetGraph — {title}" + ("  (shared)" if remote else ""))
         self.setWindowIcon(app_icon())
         self.resize(780, 700)
 
         self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
         self._transcript_md = rec.get("transcript_md") or "_No transcript._"
-        self._related_md = self._build_related_md(parent, rec.get("id"))
+        # Cross-links live in the local DB; skip for shared/remote records.
+        self._related_md = "" if remote else self._build_related_md(parent, rec.get("id"))
 
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
@@ -2709,6 +2758,9 @@ class MeetingDetailDialog(QDialog):
         delete = QPushButton("Delete")
         delete.setObjectName("danger")
         delete.clicked.connect(self._delete)
+        delete.setEnabled(not self._remote)  # don't delete shared records from here
+        if self._remote:
+            delete.setToolTip("This is a shared (remote) meeting — manage it in the shared database.")
         row.addWidget(delete)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)

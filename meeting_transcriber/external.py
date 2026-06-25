@@ -282,6 +282,28 @@ class RelationalSink:
                 if rows:
                     conn.execute(insert(t[name]), rows)
 
+    def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        """List meetings in the shared DB (optionally for one team), newest first."""
+        from sqlalchemy import select
+
+        t = self._t["meetings"]
+        q = select(t.c.id, t.c.user, t.c.title, t.c.team_id, t.c.started_at,
+                   t.c.created_at, t.c.summary_md)
+        if team_id:
+            q = q.where(t.c.team_id == team_id)
+        q = q.order_by(t.c.id.desc()).limit(limit)
+        with self._engine.connect() as conn:
+            return [dict(r) for r in conn.execute(q).mappings().all()]
+
+    def get_meeting(self, meeting_id) -> dict | None:
+        """Full meeting record from the shared DB."""
+        from sqlalchemy import select
+
+        t = self._t["meetings"]
+        with self._engine.connect() as conn:
+            row = conn.execute(select(t).where(t.c.id == meeting_id)).mappings().first()
+        return dict(row) if row else None
+
     def append_audit(self, entry: dict) -> None:
         from sqlalchemy import insert
 
