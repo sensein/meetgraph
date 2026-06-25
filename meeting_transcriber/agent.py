@@ -31,7 +31,12 @@ SKILL_DIR = Path(__file__).parent / "skills"
 class MeetingInfo(BaseModel):
     title: str | None = Field(None, description="Meeting title if stated, else null.")
     date: str | None = Field(None, description="ISO 8601 date if explicitly stated, else null.")
-    participants: list[str] = Field(default_factory=list, description="Speaker names present.")
+    participants: list[str] = Field(
+        default_factory=list,
+        description="Distinct participants. Use names explicitly stated in the conversation; for "
+        "unnamed speakers when several people take part, use 'Person A', 'Person B', …. Do not "
+        "assume all speech is one person or the recorder.",
+    )
     purpose: str | None = Field(None, description="Stated purpose, else null.")
 
 
@@ -123,6 +128,14 @@ might want to look up: named entities, technologies, tools, methods, standards, 
 domain concepts. Use the canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words and \
 anything not in the transcript. Leave the wikipedia/wikidata fields null — they are filled \
 automatically; never invent a URL.
+10a. Identify speakers, don't assume. The bracketed/leading speaker labels in the transcript are \
+AUDIO-SOURCE tags (the recorder's microphone, or the meeting/system audio) — NOT a verified roster, \
+and one source may carry several people. Infer the real participants from what is actually said \
+(names people use to address each other, self-introductions, turn-taking, Q&A). Use a real name only \
+when it is explicitly stated in the conversation. When multiple distinct speakers are clearly \
+involved but unnamed, label them "Person A", "Person B", … consistently. Never assume all speech \
+belongs to the recorder or to a single person just because the source tag repeats. Attribute topics/\
+owners using these same labels.
 10. Fix transcription errors. The text comes from automatic speech-to-text and contains \
 mis-recognised words, wrong homophones, dropped punctuation, and garbled proper nouns. Silently \
 correct obvious errors to the word the speaker clearly meant, using surrounding context (e.g. \
