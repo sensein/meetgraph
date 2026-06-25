@@ -272,7 +272,7 @@ class MainWindow(QWidget):
         root.addLayout(self._build_header())
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_record_tab(), "  ◉  Record  ")
+        self.tabs.addTab(self._build_record_tab(), "  ◉  Meeting  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -295,7 +295,7 @@ class MainWindow(QWidget):
 
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
-        self.start_btn = QPushButton("● Start")
+        self.start_btn = QPushButton("● Start meeting")
         self.start_btn.setObjectName("primary")
         self.start_btn.clicked.connect(self._on_start)
         ctrl_row.addWidget(self.start_btn)
@@ -2380,9 +2380,13 @@ class MainWindow(QWidget):
 
         self._run_async(work, done)
 
-    def _literature_async(self, meeting_id, on_finish=None) -> None:
-        """For a scientific meeting, attach relevant PubMed papers + research gaps."""
-        if meeting_id is None or not self.pubmed_enable.isChecked():
+    def _literature_async(self, meeting_id, on_finish=None, force=False) -> None:
+        """For a scientific meeting, attach relevant PubMed papers + research gaps.
+
+        ``force`` runs it on demand (the "Find papers" button) even when the
+        auto toggle is off — useful for meetings summarized before enabling it.
+        """
+        if meeting_id is None or (not force and not self.pubmed_enable.isChecked()):
             if on_finish:
                 on_finish()
             return
@@ -2750,6 +2754,7 @@ class MainWindow(QWidget):
 
     def _on_stopped(self) -> None:
         self.start_btn.setEnabled(True)
+        self.start_btn.setText("● Start new meeting")  # current meeting ended
         self.stop_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setText("❚❚ Pause")
@@ -3176,6 +3181,11 @@ class MeetingDetailDialog(QDialog):
         exp.setObjectName("primary")
         exp.clicked.connect(self._export)
         row.addWidget(exp)
+        self._papers_btn = QPushButton("Find papers")
+        self._papers_btn.setToolTip("Search PubMed for related publications (PMID + DOI) and attach them")
+        self._papers_btn.clicked.connect(self._find_papers)
+        self._papers_btn.setEnabled(not self._remote)
+        row.addWidget(self._papers_btn)
         em = QPushButton("Email…")
         em.setToolTip("Email this meeting's notes to your team")
         em.clicked.connect(self._email)
@@ -3400,6 +3410,19 @@ class MeetingDetailDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Rename", f"Renamed locally, but sync failed: {exc}")
         self._parent._refresh_meetings()
+
+    def _find_papers(self) -> None:
+        if self._remote or self._mid is None:
+            return
+        self._papers_btn.setEnabled(False)
+        self._papers_btn.setText("Searching…")
+
+        def done():
+            self._papers_btn.setText("Find papers")
+            self._papers_btn.setEnabled(True)
+            self.reload()  # show the attached publications
+
+        self._parent._literature_async(self._mid, on_finish=done, force=True)
 
     def _email(self) -> None:
         md = self._current_md()

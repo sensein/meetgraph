@@ -421,13 +421,15 @@ def link_literature(
             # finds it scientific, filter to the papers it judged relevant (with
             # points + gaps); otherwise still show the top results, just no gaps.
             if sci.is_scientific:
-                rels = {r.pmid: r for r in sci.relevant}
-                if rels:
-                    pubs = [p for p in pubs if p.pmid in rels]
+                rels = {str(r.pmid): r for r in sci.relevant}
+                filtered = [p for p in pubs if p.pmid in rels]
+                if filtered:  # only narrow when the model's pmids actually match
+                    pubs = filtered
                     for p in pubs:
                         r = rels.get(p.pmid)
                         p.relevance = r.relevance if r else None
                         p.points = list(r.points) if r else []
+                # else: keep the top PubMed results as-is (model returned no usable ids)
                 summary.research_gaps = list(sci.gaps)
         except Exception:
             pass  # keep the unfiltered top results
@@ -488,11 +490,19 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
         for p in summary.publications:
             cite = f"[{p.title}]({p.url})" if p.url else p.title
             meta = " · ".join(x for x in [p.journal, p.year] if x)
-            tail = f"  _{p.relevance}_" if p.relevance else ""
             line = f"- {cite}" + (f" — {meta}" if meta else "")
             if p.authors:
                 line += f". {p.authors}"
-            lines.append(line + tail)
+            lines.append(line)
+            ids = []
+            if p.pmid:
+                ids.append(f"PMID [{p.pmid}]({p.url or 'https://pubmed.ncbi.nlm.nih.gov/' + p.pmid + '/'})")
+            if p.doi:
+                ids.append(f"DOI [{p.doi}](https://doi.org/{p.doi})")
+            if ids:
+                lines.append("  - " + " · ".join(ids))
+            if p.relevance:
+                lines.append(f"  - _{p.relevance}_")
             lines += [f"  - {pt}" for pt in p.points]
         lines.append("")
 
