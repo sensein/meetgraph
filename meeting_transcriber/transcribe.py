@@ -125,6 +125,8 @@ def make_transcriber(config: dict) -> Transcriber:
     if engine == "local":
         return LocalWhisperTranscriber(
             model_size=config.get("model_size", "base"),
+            device=config.get("device", "auto"),
+            compute_type=config.get("compute_type", "auto"),
             language=language,
         )
     if engine == "openai":

@@ -499,11 +499,17 @@ class MainWindow(QWidget):
             "deepdml/faster-whisper-large-v3-turbo-ct2",
         ])
         self.model_combo.setCurrentText("base")
-        self.model_combo.setMinimumWidth(280)
+        self.model_combo.setMinimumWidth(240)
         self.model_combo.setToolTip("Preset size or any HuggingFace CTranslate2 Whisper repo id")
         local_l.addWidget(self.model_combo, 1)
-        from .transcribe import detect_compute
-        self._compute_label = QLabel(f"· Compute: {detect_compute()[2]}")
+        local_l.addWidget(QLabel("Compute:"))
+        self.compute_combo = QComboBox()
+        self.compute_combo.addItem("Auto", "auto")
+        self.compute_combo.addItem("CPU", "cpu")
+        self.compute_combo.addItem("GPU (CUDA)", "cuda")
+        self.compute_combo.currentIndexChanged.connect(self._update_compute_label)
+        local_l.addWidget(self.compute_combo)
+        self._compute_label = QLabel("")
         self._compute_label.setStyleSheet("color:#64748b;")
         local_l.addWidget(self._compute_label)
         self.engine_stack.addWidget(local_w)
@@ -537,7 +543,19 @@ class MainWindow(QWidget):
         self.hf_token_edit.setText(os.environ.get("HF_TOKEN", os.environ.get("HUGGING_FACE_HUB_TOKEN", "")))
         hf_row.addWidget(self.hf_token_edit, 1)
         engine_layout.addLayout(hf_row)
+        self._update_compute_label()
         return engine_box
+
+    def _update_compute_label(self) -> None:
+        from .transcribe import detect_compute
+
+        choice = self.compute_combo.currentData()
+        if choice == "cpu":
+            self._compute_label.setText("· CPU (int8)")
+        elif choice == "cuda":
+            self._compute_label.setText("· GPU CUDA (float16)")
+        else:
+            self._compute_label.setText(f"· auto → {detect_compute()[2]}")
 
     def _build_sources_box(self) -> QGroupBox:
         src_box = QGroupBox("Audio sources")
@@ -656,6 +674,10 @@ class MainWindow(QWidget):
         self.ai_models_btn.setMaximumWidth(42)
         self.ai_models_btn.clicked.connect(self._refresh_models)
         row1.addWidget(self.ai_models_btn)
+        self.ai_pull_btn = QPushButton("⤓ Pull")
+        self.ai_pull_btn.setToolTip("Download the entered model with `ollama pull`")
+        self.ai_pull_btn.clicked.connect(self._on_pull_model)
+        row1.addWidget(self.ai_pull_btn)
         outer.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -723,6 +745,8 @@ class MainWindow(QWidget):
         else:
             self.ai_key_label.setText("API key (required):")
             self.ai_base_label.setText("Base URL (optional):")
+        # Ollama pull only makes sense for the local/open-source provider.
+        self.ai_pull_btn.setVisible(key == "opensource")
         if not self._loading:
             self.store.set_setting("ai.provider", key)
         self._refresh_models()  # live fetch in the background (reads Ollama's model list)
@@ -746,6 +770,25 @@ class MainWindow(QWidget):
         else:
             self.notes_status.setText("")
 
+    def _on_pull_model(self) -> None:
+        model = self.ai_model.currentText().strip()
+        if not model:
+            QMessageBox.information(self, "Pull model", "Enter a model name to pull (e.g. llama3.1).")
+            return
+        self.ai_pull_btn.setEnabled(False)
+        self.notes_status.setText(f"Pulling {model}…")
+        worker = PullWorker(model)
+        worker.progress.connect(lambda line: self.notes_status.setText(f"Pull: {line}"))
+        worker.done.connect(self._on_pull_done)
+        self._pull_worker = worker  # keep a reference
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def _on_pull_done(self, ok: bool, msg: str) -> None:
+        self.ai_pull_btn.setEnabled(True)
+        self.notes_status.setText(("✓ " if ok else "⚠ ") + msg)
+        if ok:
+            self._refresh_models()
+
     # ----- config persistence (so settings + keys survive restarts) -----
     def _wire_config_persistence(self) -> None:
         self.ai_model.currentTextChanged.connect(self._save_ai_fields)
@@ -761,6 +804,7 @@ class MainWindow(QWidget):
         self.mic_combo.currentIndexChanged.connect(self._persist_config)
         self.sys_combo.currentIndexChanged.connect(self._persist_config)
         self.hf_token_edit.textChanged.connect(self._persist_config)
+        self.compute_combo.currentIndexChanged.connect(self._persist_config)
 
     def _apply_hf_token(self) -> None:
         token = self.hf_token_edit.text().strip()
@@ -791,6 +835,7 @@ class MainWindow(QWidget):
         s("t.mic_device", self.mic_combo.currentText())
         s("t.sys_device", self.sys_combo.currentText())
         s("t.hf_token", self.hf_token_edit.text())
+        s("t.compute", self.compute_combo.currentData() or "auto")
         self._apply_hf_token()
         self._save_ai_fields()
 
@@ -828,6 +873,11 @@ class MainWindow(QWidget):
         if hf:
             self.hf_token_edit.setText(hf)
         self._apply_hf_token()
+        comp = g("t.compute")
+        if comp:
+            i = self.compute_combo.findData(comp)
+            if i >= 0:
+                self.compute_combo.setCurrentIndex(i)
         for combo, k in ((self.mic_combo, "t.mic_device"), (self.sys_combo, "t.sys_device")):
             name = g(k)
             if name:
@@ -953,10 +1003,15 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "No source", "Enable at least one audio source.")
             return
 
+        device, compute_type = {
+            "cpu": ("cpu", "int8"), "cuda": ("cuda", "float16"),
+        }.get(self.compute_combo.currentData(), ("auto", "auto"))
         config = {
             "engine": self.engine_combo.currentData(),
             "language": self.lang_edit.text().strip(),
-            "model_size": self.model_combo.currentText(),
+            "model_size": self.model_combo.currentText().strip(),
+            "device": device,
+            "compute_type": compute_type,
             "api_key": self.api_key_edit.text().strip(),
             "openai_model": self.openai_model_combo.currentText(),
         }
@@ -1123,6 +1178,36 @@ class ModelsFetcher(QObject):
         except Exception:
             models = []
         self.done.emit(self.provider, models)
+
+
+class PullWorker(QObject):
+    """Runs `ollama pull <model>` off the GUI thread, streaming progress."""
+
+    progress = pyqtSignal(str)
+    done = pyqtSignal(bool, str)  # ok, message
+
+    def __init__(self, model: str):
+        super().__init__()
+        self.model = model
+
+    def run(self) -> None:
+        import subprocess
+
+        try:
+            proc = subprocess.Popen(
+                ["ollama", "pull", self.model],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            last = ""
+            for line in proc.stdout:  # type: ignore[union-attr]
+                last = line.strip() or last
+                self.progress.emit(last)
+            code = proc.wait()
+            self.done.emit(code == 0, "Pulled" if code == 0 else f"ollama pull exited {code}")
+        except FileNotFoundError:
+            self.done.emit(False, "ollama not found — install Ollama (ollama.com)")
+        except Exception as exc:
+            self.done.emit(False, str(exc))
 
 
 class NotesWorker(QObject):
