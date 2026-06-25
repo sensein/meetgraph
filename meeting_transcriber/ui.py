@@ -794,10 +794,10 @@ class MainWindow(QWidget):
         g_form = QFormLayout()
         g_form.setContentsMargins(22, 0, 0, 0)
         self.ext_graph_store = QLineEdit()
-        self.ext_graph_store.setPlaceholderText("http://localhost:7878/store   (Graph Store Protocol — preferred)")
+        self.ext_graph_store.setPlaceholderText("http://localhost:7878/store   (Graph Store endpoint — include the path, e.g. /store)")
         g_form.addRow("Graph Store URL", self.ext_graph_store)
         self.ext_graph_update = QLineEdit()
-        self.ext_graph_update.setPlaceholderText("http://localhost:7878/update   (SPARQL Update — fallback)")
+        self.ext_graph_update.setPlaceholderText("http://localhost:7878/update   (SPARQL Update — preferred)")
         g_form.addRow("Update URL", self.ext_graph_update)
         self.ext_graph_query = QLineEdit()
         self.ext_graph_query.setPlaceholderText("http://localhost:7878/query   (used to test the connection)")
@@ -814,8 +814,10 @@ class MainWindow(QWidget):
         self.ext_graph_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.ext_graph_pass.setPlaceholderText("optional")
         g_form.addRow("Password", self.ext_graph_pass)
-        g_hint = QLabel("Each meeting is written as its own named graph (replaced on re-sync), "
-                        "with key terms linked to Wikipedia/Wikidata.")
+        g_hint = QLabel("All meetings are written to one named graph (above), each replaced cleanly "
+                        "on re-sync, with key terms linked to Wikipedia/Wikidata. If an Update URL "
+                        "is set it's used (most reliable); otherwise the Graph Store URL must point "
+                        "at the store endpoint (e.g. Oxigraph's /store), not the server root.")
         g_hint.setStyleSheet(_HINT)
         g_hint.setWordWrap(True)
         g_form.addRow("", g_hint)

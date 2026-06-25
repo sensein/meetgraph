@@ -333,17 +333,23 @@ class GraphSink:
                 pass  # 404 if the graph doesn't exist yet — fine
 
     def replace_all(self, records: list[dict]) -> None:
-        """Replace the whole 'meetgraph' graph with the full corpus (clean re-sync)."""
+        """Replace the whole 'meetgraph' graph with the full corpus (clean re-sync).
+
+        Prefer SPARQL Update (CLEAR + INSERT) when an Update endpoint is set — it
+        targets the named graph directly. The Graph Store PUT is used only when
+        no Update URL is configured (and it must point at the store endpoint,
+        e.g. Oxigraph's /store, not the server root).
+        """
         ng = self.named_graph
-        body = kg.serialize_corpus(records, fmt="turtle")
-        if self.cfg.graph_store_url:
-            self._request(self._gsp_url(), body, "text/turtle", "PUT")  # PUT replaces graph
-        elif self.cfg.update_url:
+        if self.cfg.update_url:
             triples = kg.serialize_corpus(records, fmt="nt").decode("utf-8")
             update = (f"CLEAR SILENT GRAPH <{ng}> ;\n"
                       f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}")
             self._request(self.cfg.update_url, update.encode("utf-8"),
                           "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            body = kg.serialize_corpus(records, fmt="turtle")
+            self._request(self._gsp_url(), body, "text/turtle", "PUT")  # PUT replaces graph
         else:
             raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
 
