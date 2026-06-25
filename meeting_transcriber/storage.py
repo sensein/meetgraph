@@ -112,8 +112,10 @@ class Store:
                 (summary_md, summary_json, meeting_id),
             )
 
-    def list_meetings(self, user: str | None = None, limit: int = 100) -> list[Meeting]:
-        q = "SELECT id, user, title, started_at, ended_at, summary_md, created_at FROM meetings"
+    _LIST_COLS = "id, user, title, started_at, ended_at, summary_md, created_at"
+
+    def list_meetings(self, user: str | None = None, limit: int = 200) -> list[Meeting]:
+        q = f"SELECT {self._LIST_COLS} FROM meetings"
         args: tuple = ()
         if user:
             q += " WHERE user = ?"
@@ -122,3 +124,27 @@ class Store:
         args = args + (limit,)
         with self._connect() as con:
             return [Meeting(**dict(r)) for r in con.execute(q, args).fetchall()]
+
+    def search_meetings(self, query: str, limit: int = 200) -> list[Meeting]:
+        """Full-text-ish search across title, transcript and summary."""
+        if not query.strip():
+            return self.list_meetings(limit=limit)
+        like = f"%{query.strip()}%"
+        q = (
+            f"SELECT {self._LIST_COLS} FROM meetings "
+            "WHERE title LIKE ? OR transcript_plain LIKE ? OR summary_md LIKE ? "
+            "ORDER BY id DESC LIMIT ?"
+        )
+        with self._connect() as con:
+            rows = con.execute(q, (like, like, like, limit)).fetchall()
+            return [Meeting(**dict(r)) for r in rows]
+
+    def get_meeting(self, meeting_id: int) -> dict | None:
+        """Full record including transcript + summary bodies."""
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+            return dict(row) if row else None
+
+    def delete_meeting(self, meeting_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))

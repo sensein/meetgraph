@@ -23,9 +23,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QTextEdit,
@@ -237,7 +240,9 @@ class MainWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_record_tab(), "  ◉  Record  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
+        self.tabs.addTab(self._build_history_tab(), "  🗂  History  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
         self.status_label = QLabel("Ready.")
@@ -341,6 +346,113 @@ class MainWindow(QWidget):
         self._summary_timer.setInterval(60_000)
         self._summary_timer.timeout.connect(self._on_summary_tick)
         return page
+
+    def _build_history_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("RecordPage")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(2, 10, 2, 2)
+        v.setSpacing(10)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("🔎  Search meetings — title, transcript, or notes…")
+        self.history_search.setClearButtonEnabled(True)
+        self.history_search.textChanged.connect(self._refresh_history)
+        search_row.addWidget(self.history_search, 1)
+        refresh = QPushButton("↻ Refresh")
+        refresh.clicked.connect(self._refresh_history)
+        search_row.addWidget(refresh)
+        self.history_delete_btn = QPushButton("Delete")
+        self.history_delete_btn.setObjectName("danger")
+        self.history_delete_btn.clicked.connect(self._delete_selected_meeting)
+        search_row.addWidget(self.history_delete_btn)
+        v.addLayout(search_row)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        self.history_list = QListWidget()
+        self.history_list.setMinimumWidth(260)
+        self.history_list.setStyleSheet(
+            "QListWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:6px;}"
+            "QListWidget::item{padding:8px;border-radius:7px;}"
+            "QListWidget::item:selected{background:#2563eb;color:#ffffff;}"
+        )
+        self.history_list.currentItemChanged.connect(self._on_history_select)
+        split.addWidget(self.history_list)
+
+        self.history_view = QTextEdit()
+        self.history_view.setObjectName("transcript")
+        self.history_view.setReadOnly(True)
+        self.history_view.setFont(QFont("SF Pro Text", 13))
+        self.history_view.setPlaceholderText("Select a meeting to view its summary and full transcript.")
+        split.addWidget(self.history_view)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([300, 620])
+        v.addWidget(split, 1)
+
+        self.history_count = QLabel("")
+        self.history_count.setStyleSheet("color:#64748b; font-size:12px;")
+        v.addWidget(self.history_count)
+        return page
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.tabText(index).strip().endswith("History"):
+            self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        query = self.history_search.text() if hasattr(self, "history_search") else ""
+        try:
+            meetings = self.store.search_meetings(query)
+        except Exception as exc:
+            self.history_count.setText(f"⚠ {exc}")
+            return
+        self.history_list.blockSignals(True)
+        self.history_list.clear()
+        for m in meetings:
+            when = (m.started_at or m.created_at or "")[:16].replace("T", " ")
+            badge = "✦" if m.summary_md else "·"
+            item = QListWidgetItem(f"{badge}  {m.title}\n     {when}   ·   {m.user}")
+            item.setData(Qt.ItemDataRole.UserRole, m.id)
+            self.history_list.addItem(item)
+        self.history_list.blockSignals(False)
+        self.history_count.setText(
+            f"{len(meetings)} meeting(s)" + (f" matching “{query}”" if query.strip() else "")
+        )
+
+    def _on_history_select(self, current, _previous=None) -> None:
+        if current is None:
+            self.history_view.clear()
+            return
+        mid = current.data(Qt.ItemDataRole.UserRole)
+        rec = self.store.get_meeting(mid)
+        if not rec:
+            self.history_view.setMarkdown("_Meeting not found._")
+            return
+        parts = []
+        if rec.get("summary_md"):
+            parts.append(rec["summary_md"])
+            parts.append("\n\n---\n\n")
+        else:
+            parts.append(f"# {rec.get('title') or 'Meeting'}\n\n_No summary was generated._\n\n---\n\n")
+        parts.append("## Full transcript\n\n")
+        parts.append(rec.get("transcript_md") or "_No transcript._")
+        self.history_view.setMarkdown("".join(parts))
+
+    def _delete_selected_meeting(self) -> None:
+        item = self.history_list.currentItem()
+        if item is None:
+            return
+        mid = item.data(Qt.ItemDataRole.UserRole)
+        if QMessageBox.question(
+            self, "Delete meeting", "Delete this meeting from the local database? This cannot be undone."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete_meeting(mid)
+        self.history_view.clear()
+        self._refresh_history()
 
     def _build_config_tab(self) -> QWidget:
         page = QWidget()
@@ -651,6 +763,7 @@ class MainWindow(QWidget):
         if self._meeting_id is not None:
             try:
                 self.store.update_summary(self._meeting_id, markdown, json_text)
+                self._refresh_history()
             except Exception:
                 pass
 
@@ -782,6 +895,7 @@ class MainWindow(QWidget):
                 transcript_plain=self.transcript.to_plain(),
             )
             self.status_label.setText(f"Saved transcript to local database (#{self._meeting_id}).")
+            self._refresh_history()
         except Exception as exc:
             self.status_label.setText(f"⚠ Could not save to database: {exc}")
 
