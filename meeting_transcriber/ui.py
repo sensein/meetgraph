@@ -325,6 +325,23 @@ class MainWindow(QWidget):
         self.models_banner.setText("")
         v.addWidget(self.models_banner)
 
+        # Which team this meeting is recorded into (or no team / personal). Lets
+        # you see your team at a glance and switch it without leaving this tab.
+        team_row = QHBoxLayout(); team_row.setSpacing(8)
+        team_row.addWidget(QLabel("Recording into:"))
+        self.meeting_team_combo = QComboBox()
+        self.meeting_team_combo.setToolTip(
+            "Choose the team this meeting is saved/synced to, or “No team (personal)” to keep it "
+            "to yourself. Manage and join teams in Configuration.")
+        self.meeting_team_combo.currentIndexChanged.connect(self._on_meeting_team_changed)
+        team_row.addWidget(self.meeting_team_combo)
+        self.meeting_team_hint = QLabel("")
+        self.meeting_team_hint.setStyleSheet("color:#64748b; font-size:11px;")
+        team_row.addWidget(self.meeting_team_hint)
+        team_row.addStretch()
+        v.addLayout(team_row)
+        self._populate_meeting_team_combo()
+
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
         self.start_btn = QPushButton("● Start meeting")
@@ -534,6 +551,60 @@ class MainWindow(QWidget):
             idx = self.scope_combo.findData(("team", self.team_id))
         self.scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.scope_combo.blockSignals(False)
+
+    def _populate_meeting_team_combo(self) -> None:
+        """Meeting-tab selector: 'No team (personal)' + the teams you can record
+        into (active memberships). Reflects/sets the active team."""
+        if not hasattr(self, "meeting_team_combo"):
+            return
+        self.meeting_team_combo.blockSignals(True)
+        self.meeting_team_combo.clear()
+        self.meeting_team_combo.addItem("No team (personal)", None)
+        try:
+            memberships = self.store.list_memberships()
+            revoked = {k.get("key_id") for k in self.store.list_team_keys() if k.get("revoked")}
+        except Exception:
+            memberships, revoked = [], set()
+        # Teams you can record into: currently active, plus ones you've left whose
+        # key is still valid (selecting them re-joins automatically). Revoked keys
+        # are excluded - they're view-only via the Summary 'Show' menu.
+        selectable = [m for m in memberships
+                      if (m.get("state") or "active") in ("active", "left")
+                      and m.get("key_id") not in revoked]
+        for m in selectable:
+            rejoin = (m.get("state") or "active") != "active"
+            label = (m.get("team_name") or m.get("team_id")) + ("  (rejoin)" if rejoin else "")
+            self.meeting_team_combo.addItem(label, m.get("team_id"))
+        idx = self.meeting_team_combo.findData(self.team_id or None)
+        self.meeting_team_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.meeting_team_combo.blockSignals(False)
+        if hasattr(self, "meeting_team_hint"):
+            if self.team_id:
+                self.meeting_team_hint.setText("· synced to the team's shared database")
+            elif selectable:
+                self.meeting_team_hint.setText("· kept on this device only")
+            else:
+                self.meeting_team_hint.setText("· join a team in Configuration to share")
+
+    def _on_meeting_team_changed(self) -> None:
+        tid = self.meeting_team_combo.currentData()
+        if tid == (self.team_id or None):
+            return
+        if tid:
+            self._switch_team(tid)
+        else:
+            self._set_personal_mode()
+
+    def _set_personal_mode(self) -> None:
+        """Leave the active team slot without leaving the team: future meetings
+        are personal (untagged). Memberships are kept so you can switch back."""
+        self.team_id, self.team_name = "", ""
+        self.store.set_setting("team.id", "")
+        self.store.set_setting("team.name", "")
+        self._team_readonly = False
+        self._update_team_status()
+        self._populate_scope_combo()
+        self._refresh_meetings()
 
     def _team_name(self, team_id) -> str:
         if not team_id:
@@ -1602,8 +1673,9 @@ are stored locally in a protected config file.</p>
         # "Teams..." (switch active team) only matters once you've joined more than one.
         if getattr(self, "teams_btn", None) is not None:
             self.teams_btn.setVisible(n_teams > 1)
-        # Keep the Summary 'Show:' selector in step with the teams you belong to.
+        # Keep the Summary 'Show:' selector and Meeting-tab team picker in step.
         self._populate_scope_combo()
+        self._populate_meeting_team_combo()
 
     def _fill_graph_endpoints(self) -> None:
         """Derive query/update/store URLs from the chosen DB type + base URL."""
@@ -2509,24 +2581,52 @@ are stored locally in a protected config file.</p>
         self._on_rel_kind_changed()
         self._persist_external()
 
+    def _membership_key_revoked(self, m: dict) -> bool:
+        """Whether a membership's stored key has been revoked (local list first,
+        then the team's own shared DB best-effort)."""
+        kid = m.get("key_id")
+        if not kid:
+            return False
+        try:
+            if any(k.get("key_id") == kid and k.get("revoked") for k in self.store.list_team_keys()):
+                return True
+        except Exception:
+            pass
+        try:
+            from . import team
+            from .external import structured_sink
+            ext = team.parse_team_key(m.get("key") or "")["external"]
+            if ext.relational.enabled and ext.relational.url:
+                return kid in structured_sink(ext.relational).revoked_key_ids()
+        except Exception:
+            pass
+        return False
+
     def _switch_team(self, team_id: str) -> None:
         """Make ``team_id`` the active team: re-apply its shared-DB config and
         recompute read-only status. Content of every joined team stays isolated
         and accessible - switching just changes which one you're viewing/writing.
 
-        A team you've left or been revoked from can't become active again here -
-        it's only viewable read-only, so we just point the Summary 'Show' menu at
-        it instead."""
+        A team you previously LEFT can be re-activated here automatically using
+        its stored key (no need to re-paste it). Only a REVOKED key can't rejoin -
+        that one is viewable read-only via the Summary 'Show' menu instead."""
         from . import team
         m = self.store.get_membership(team_id)
         if not m:
             return
         if (m.get("state") or "active") != "active":
-            if hasattr(self, "scope_combo"):
-                idx = self.scope_combo.findData(("team", team_id))
-                if idx >= 0:
-                    self.scope_combo.setCurrentIndex(idx)  # read-only view
-            return
+            if self._membership_key_revoked(m):
+                if hasattr(self, "scope_combo"):
+                    idx = self.scope_combo.findData(("team", team_id))
+                    if idx >= 0:
+                        self.scope_combo.setCurrentIndex(idx)  # read-only view only
+                return
+            # Left but the key is still valid -> auto-rejoin with the stored key.
+            self.store.add_membership(team_id, m.get("team_name") or team_id,
+                                      m.get("key_id") or "", m.get("key") or "",
+                                      datetime.now().isoformat(timespec="seconds"))
+            self._audit("team_rejoined", None, m.get("team_name") or team_id)
+            m = self.store.get_membership(team_id)
         try:
             parsed = team.parse_team_key(m.get("key") or "")
             self._apply_external_config(parsed["external"])
@@ -4290,12 +4390,13 @@ class TeamsDialog(QDialog):
             active = m.get("team_id") == self._win.team_id
             state = m.get("state") or "active"
             until = (m.get("access_until") or "")[:10]
+            key_revoked = m.get("key_id") in revoked
             if active:
                 status = "● Active"
-            elif state == "left":
-                status = f"Left — read-only{(' to ' + until) if until else ''}"
-            elif state == "revoked" or m.get("key_id") in revoked:
+            elif state == "revoked" or key_revoked:
                 status = f"Revoked — read-only{(' to ' + until) if until else ''}"
+            elif state == "left":
+                status = "Left — Switch to rejoin"
             else:
                 status = ""
             cells = [m.get("team_name") or m.get("team_id") or "",
@@ -4313,17 +4414,14 @@ class TeamsDialog(QDialog):
             self.status.setText("Select a team first.")
             return
         name = m.get("team_name") or m["team_id"]
-        state = m.get("state") or "active"
-        inactive = state != "active" or m.get("key_id") in self._revoked_ids()
+        was_left = (m.get("state") or "active") == "left"
         self._win._switch_team(m["team_id"])
         self._reload()
         if self._win.team_id == m["team_id"]:
-            self.status.setText(f"Switched to “{name}”.")
-        elif inactive:
-            word = "left" if state == "left" else "revoked"
-            self.status.setText(f"You {word} “{name}” — now showing it read-only in the Summary tab.")
+            self.status.setText(f"{'Rejoined' if was_left else 'Switched to'} “{name}”.")
         else:
-            self.status.setText(f"Couldn't switch to “{name}”.")
+            self.status.setText(f"“{name}” key was revoked — showing it read-only in the Summary tab "
+                                "(rejoin needs a new key).")
 
     def _leave(self) -> None:
         m = self._selected()
