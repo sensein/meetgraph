@@ -54,6 +54,14 @@ and turns the conversation into structured, linked, shareable knowledge. Additio
 
 ![Configuration tab](img/configuration.png)
 
+**Notes** — searchable notes table with the **Show** scope (Personal / All / a team).
+
+![Configuration tab](img/note-view.png)
+
+**Visualization** — visualization of notes, meetings graph.
+
+![Configuration tab](img/graph-view.png)
+
 ---
 
 ## 1. Install
