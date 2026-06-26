@@ -3,16 +3,20 @@
 # Release flow:  bump `version` in pyproject.toml → commit → tag → push the tag:
 #     git tag v0.2.0 && git push origin v0.2.0
 #
-# ONE-TIME SETUP — PyPI Trusted Publishing (recommended, no stored secrets).
-# On https://pypi.org → your project → Publishing → "Add a pending publisher":
-#     • PyPI Project Name:  meetgraph
-#     • Owner:              e.g., tekrajchhetri
-#     • Repository name:    meetgraph
-#     • Workflow name:      publish.yml          (this file's name — keep in sync)
-#     • Environment name:   pypi                 (matches `environment:` below)
-# The `id-token: write` permission lets the job mint a short-lived OIDC token.
-# (API-token alternative: add a PYPI_API_TOKEN secret and pass it as `password:`
-#  to the publish step, then drop the `id-token`/`environment` lines.)
+# AUTH — this workflow uses an API token (PYPI_API_TOKEN repo secret), wired in
+# the publish step below. Create it at https://pypi.org/manage/account/token/
+# (account-wide for the FIRST upload, then narrow to the `meetgraph` project).
+#
+# ALTERNATIVE — Trusted Publishing (OIDC, no stored token). Register a publisher
+# on PyPI (project → Publishing; use "pending publisher" before the project's
+# first release) whose fields EXACTLY match this repo's OIDC claims:
+#     • Owner:            sensein
+#     • Repository name:  meetgraph
+#     • Workflow name:    publish.yml      (this file's name)
+#     • Environment name: pypi             (must equal the job's `environment:`)
+# Then add `id-token: write` under the job permissions, set `environment: pypi`,
+# and remove the `password:` line. A mismatch in ANY field above is what causes
+# "invalid-publisher: ... no corresponding publisher".
 
 name: Release
 
@@ -37,9 +41,7 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: pypi
     permissions:
-      id-token: write   # Required for Trusted Publishing (OIDC)
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -60,3 +62,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}   # API token (repo secret); no OIDC needed
+          skip-existing: true
