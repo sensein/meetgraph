@@ -187,7 +187,8 @@ share (shared terms link items together), **teams**, and the **links** between t
 links, note auto-links, note→meeting "about", team membership). Scroll to **zoom**, drag the
 background to **pan**, **Fit** to recenter, and use **Show** to scope to Personal / All / a team.
 **Click a meeting or note** (blue/teal) to open its editor — any edit there saves and **syncs** as
-usual, then the graph refreshes.
+usual, then the graph refreshes. **Click a key term** (amber) to open a panel listing every meeting
+and note that mentions it, with its Wikipedia/Wikidata links — click a row to jump to that item.
 
 ## 7. Notes (personal & team)
 

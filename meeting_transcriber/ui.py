@@ -1128,7 +1128,8 @@ class MainWindow(QWidget):
                 term = (kt.get("term") or "").strip()
                 if not term:
                     continue
-                tk = add(f"t:{term.lower()}", term, "term")
+                # ref = the term text, so clicking it opens its usage panel.
+                tk = add(f"t:{term.lower()}", term, "term", term)
                 edges.append((owner_key, tk))
 
         for m in meetings:
@@ -1201,7 +1202,8 @@ class MainWindow(QWidget):
         self.graph_count.setText(msg)
 
     def _open_graph_node(self, kind: str, ref) -> None:
-        """Double-clicking a meeting/note node opens its editor (edits sync on save)."""
+        """Clicking a node: meetings/notes open their editor (edits sync on save);
+        a key term opens a panel of everything that mentions it."""
         try:
             if kind == "meeting":
                 rec = self.store.get_meeting(ref)
@@ -1211,6 +1213,8 @@ class MainWindow(QWidget):
                 rec = self.store.get_note(ref)
                 if rec:
                     NoteEditorDialog(self, rec).exec()
+            elif kind == "term":
+                TermUsageDialog(self, str(ref)).exec()
         except Exception:
             return
         self._refresh_graph()
@@ -1693,8 +1697,9 @@ bundled MCO ontology's <code>Note</code> class.</p>
 <p>The <b>🕸 Graph</b> tab visualises your knowledge graph — meetings, notes, the key terms they
 share, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>Fit</b> to
 recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Click a meeting or note</b>
-(blue/teal) to open and edit it — your changes save and sync, then the graph refreshes. Colours:
-blue = meeting, teal = note, amber = key term, purple = team.</p>
+(blue/teal) to open and edit it — your changes save and sync, then the graph refreshes. <b>Click a
+key term</b> (amber) to see every meeting and note that mentions it, with its Wikipedia/Wikidata
+links. Colours: blue = meeting, teal = note, amber = key term, purple = team.</p>
 
 <h2>Capturing meeting (system) audio</h2>
 <p>To transcribe the other participants, route system audio through a virtual
@@ -6417,7 +6422,9 @@ class _GraphCanvas(QGraphicsView):
             ell.setData(0, kind)
             ell.setData(1, ref)
             openable = ref is not None
-            ell.setToolTip(f"{kind}: {meta['label']}" + ("  (click to open)" if openable else ""))
+            hint = {"meeting": "  — click to open", "note": "  — click to open",
+                    "term": "  — click to see where it's used"}.get(kind, "")
+            ell.setToolTip(f"{meta['label']}{hint if openable else ''}")
             if openable:
                 ell.setCursor(Qt.CursorShape.PointingHandCursor)
             if kind != "term":  # label meetings/notes/teams; key terms show on hover
@@ -6434,6 +6441,144 @@ class _GraphCanvas(QGraphicsView):
         rect = scene.itemsBoundingRect()
         scene.setSceneRect(rect.adjusted(-60, -40, 60, 40))
         self.fit()
+
+
+class TermUsageDialog(QDialog):
+    """Everything that mentions a key term — the meetings and notes it appears in,
+    plus its Wikipedia/Wikidata links. Click a row to open that item."""
+
+    def __init__(self, main_window, term: str):
+        super().__init__(main_window)
+        self._win = main_window
+        self._term = term
+        self.setWindowTitle(f"MeetGraph — “{term}”")
+        self.setWindowIcon(app_icon())
+        self.resize(640, 480)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        head = QLabel(term)
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+
+        rows, links = self._scan()
+        n_m = sum(1 for r in rows if r["kind"] == "meeting")
+        n_n = sum(1 for r in rows if r["kind"] == "note")
+        sub = QLabel(f"Mentioned in {n_m} meeting(s) and {n_n} note(s).")
+        sub.setObjectName("HeaderSubtitle")
+        v.addWidget(sub)
+        if links.get("wikipedia") or links.get("wikidata"):
+            bits = []
+            if links.get("wikipedia"):
+                bits.append(f"<a href='{links['wikipedia']}'>Wikipedia</a>")
+            if links.get("wikidata"):
+                bits.append(f"<a href='{links['wikidata']}'>Wikidata</a>")
+            ln = QLabel("  ·  ".join(bits))
+            ln.setOpenExternalLinks(True)
+            ln.setStyleSheet("font-size:12px;")
+            v.addWidget(ln)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Type", "Title", "When"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setCursor(Qt.CursorShape.PointingHandCursor)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for c in (0, 2):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.cellClicked.connect(self._open)
+        for r in rows:
+            i = self.table.rowCount()
+            self.table.insertRow(i)
+            type_item = QTableWidgetItem("📝 Note" if r["kind"] == "note" else "◉ Meeting")
+            type_item.setData(Qt.ItemDataRole.UserRole, r["kind"])
+            type_item.setData(Qt.ItemDataRole.UserRole + 1, r["id"])
+            self.table.setItem(i, 0, type_item)
+            self.table.setItem(i, 1, QTableWidgetItem(r["title"]))
+            self.table.setItem(i, 2, QTableWidgetItem(r["when"]))
+        v.addWidget(self.table, 1)
+        if not rows:
+            empty = QLabel("No meetings or notes mention this term locally.")
+            empty.setStyleSheet("color:#64748b; font-size:12px;")
+            v.addWidget(empty)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+
+    def _scan(self):
+        import json as _json
+
+        term_l = (self._term or "").strip().lower()
+        out: list[dict] = []
+        links: dict = {}
+        win = self._win
+
+        def match(summary) -> bool:
+            for kt in summary.get("key_terms") or []:
+                if (kt.get("term") or "").strip().lower() == term_l:
+                    links.setdefault("wikipedia", kt.get("wikipedia"))
+                    links.setdefault("wikidata", kt.get("wikidata"))
+                    return True
+            return False
+
+        try:
+            for m in win.store.list_meetings(limit=5000):
+                rec = win.store.get_meeting(m.id)
+                if not rec or not rec.get("summary_json"):
+                    continue
+                try:
+                    s = _json.loads(rec["summary_json"])
+                except Exception:
+                    continue
+                if match(s):
+                    out.append({"kind": "meeting", "id": m.id,
+                                "title": m.title or f"Meeting {m.id}",
+                                "when": (m.started_at or m.created_at or "")[:16].replace("T", " ")})
+        except Exception:
+            pass
+        try:
+            for n in win.store.list_notes(limit=5000):
+                rec = win.store.get_note(n["id"])
+                if not rec or not rec.get("summary_json"):
+                    continue
+                try:
+                    s = _json.loads(rec["summary_json"])
+                except Exception:
+                    continue
+                if match(s):
+                    out.append({"kind": "note", "id": n["id"],
+                                "title": n.get("title") or f"Note {n['id']}",
+                                "when": (n.get("updated_at") or n.get("created_at") or "")[:16].replace("T", " ")})
+        except Exception:
+            pass
+        return out, {k: v for k, v in links.items() if v}
+
+    def _open(self, row: int, _col: int = 0) -> None:
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        kind = item.data(Qt.ItemDataRole.UserRole)
+        rid = item.data(Qt.ItemDataRole.UserRole + 1)
+        try:
+            if kind == "meeting":
+                rec = self._win.store.get_meeting(rid)
+                if rec:
+                    MeetingDetailDialog(self._win, rec).exec()
+            else:
+                rec = self._win.store.get_note(rid)
+                if rec:
+                    NoteEditorDialog(self._win, rec).exec()
+        except Exception:
+            return
+        self._win._refresh_graph()
 
 
 class WelcomeDialog(QDialog):
