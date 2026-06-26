@@ -317,7 +317,7 @@ meeting_transcriber/
 | **Left a team — how do I get back?** | If the key isn't revoked, just pick it in the Meeting **Recording into:** picker (shown as *(rejoin)*) — it re-joins automatically. A revoked key needs a fresh one. |
 
 In-app, see the **❓ Help** and **ℹ About** tabs.
-```
+ 
 
 ## License
 
