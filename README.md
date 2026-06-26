@@ -78,6 +78,11 @@ Requires **Python 3.10–3.13** and the system **PortAudio** library.
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt   # Windows: .venv\Scripts\python
 ```
+or 
+
+```bash
+pip install meetgraph
+```
 
 Optional extras are only needed for specific features and degrade gracefully if
 missing: `mlx-whisper` (Apple-GPU transcription, macOS arm64), `pyoxigraph`
