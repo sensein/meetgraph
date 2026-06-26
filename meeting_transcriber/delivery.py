@@ -2,9 +2,9 @@
 
 Beyond email and the database, the user can push each finished meeting to:
 
-* a **REST endpoint** (webhook) — an HTTP POST/PUT of a JSON payload with the
+* a **REST endpoint** (webhook) - an HTTP POST/PUT of a JSON payload with the
   summary, structured notes, and transcript; stdlib-only.
-* an **MCP server** — call a tool on a Model Context Protocol server with the
+* an **MCP server** - call a tool on a Model Context Protocol server with the
   summary + transcript as arguments. Uses the optional ``mcp`` package.
 
 Both are best-effort and configured in the app; a sink that isn't enabled or

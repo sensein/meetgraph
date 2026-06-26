@@ -1,9 +1,9 @@
 """Resolve key terms to *verified* Wikipedia articles and Wikidata entities.
 
 Given a term the meeting actually mentioned (a concept, technology, person,
-organisation…), we look it up against the live Wikipedia API and return the
+organisation...), we look it up against the live Wikipedia API and return the
 canonical article URL plus the corresponding Wikidata entity. Links are only
-returned when a real page is found — we never fabricate a URL — so the notes
+returned when a real page is found - we never fabricate a URL - so the notes
 can hyperlink terms without risking dead or wrong links.
 
 Dependency-free (stdlib ``urllib``). Results are cached in-process, and a small

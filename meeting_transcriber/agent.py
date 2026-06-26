@@ -2,9 +2,9 @@
 
 Implements the bundled ``meeting-notes`` skill (``skills/meeting-notes/``): its
 ``MeetingSummary`` schema, its faithfulness rules, and its ``clean_transcript``
-pre-processor. The agent is **provider-agnostic** — pick Claude (Anthropic),
+pre-processor. The agent is **provider-agnostic** - pick Claude (Anthropic),
 OpenAI, OpenRouter, or any OpenAI-compatible open-source / local server
-(Ollama, vLLM, LM Studio, …) with your own API key and base URL.
+(Ollama, vLLM, LM Studio, ...) with your own API key and base URL.
 
 The typed output is validated against the Pydantic models below; pydantic-ai
 retries the model on a validation failure (the skill's "repair" step).
@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 # Anonymous diarization / source labels (Person A, Speaker 1, You, Mic, Meeting,
-# System audio …) — kept in the live transcript but excluded from the summary.
+# System audio ...) - kept in the live transcript but excluded from the summary.
 _ANON_SPEAKER_RE = re.compile(
     r"^(person|speaker|participant)\s*[a-z0-9]+$|^(you|me|mic|meeting|system(\s*audio)?|unknown)$",
     re.IGNORECASE,
@@ -38,7 +38,7 @@ SKILL_DIR = Path(__file__).parent / "skills"
 
 
 # --------------------------------------------------------------------------- #
-# Output schema — mirrors skills/meeting-notes/schemas/meeting-summary.schema.json
+# Output schema - mirrors skills/meeting-notes/schemas/meeting-summary.schema.json
 # --------------------------------------------------------------------------- #
 class MeetingInfo(BaseModel):
     title: str | None = Field(None, description="Meeting title if stated, else null.")
@@ -73,7 +73,7 @@ class KeyTerm(BaseModel):
     description: str | None = Field(
         None, description="One-line gloss from the discussion, if helpful; else null."
     )
-    # Filled automatically by link_key_terms() — the model must NOT populate these.
+    # Filled automatically by link_key_terms() - the model must NOT populate these.
     wikipedia: str | None = Field(None, description="Leave null; resolved automatically.")
     wikidata: str | None = Field(None, description="Leave null; resolved automatically.")
 
@@ -105,7 +105,7 @@ class MeetingSummary(BaseModel):
         default_factory=list,
         description="Salient terms worth looking up — named entities, technologies, methods, organisations.",
     )
-    # Filled by link_literature() for scientific discussions — not by the main pass.
+    # Filled by link_literature() for scientific discussions - not by the main pass.
     publications: list[Publication] = Field(default_factory=list)
     research_gaps: list[str] = Field(default_factory=list)
     # Model provenance (which engine/model produced transcript + notes), set by the app.
@@ -113,7 +113,7 @@ class MeetingSummary(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# System prompt — the skill's mode-C instruction + its Hard rules
+# System prompt - the skill's mode-C instruction + its Hard rules
 # --------------------------------------------------------------------------- #
 SYSTEM_PROMPT = """\
 You convert a meeting/call transcript into a single structured object capturing \
@@ -128,7 +128,7 @@ read, not formal advice"). Never flatten a tentative opinion into a firm fact.
 person, set `attribution` to that person; neutral factual recaps need no attribution.
 4. Separate firm from tentative. `decisions` are things actually settled; speculation \
 and deferred items are not decisions. Conditional decisions keep their condition in the text.
-5. Paraphrase, don't quote. `points` are short, paraphrased, factual statements — not \
+5. Paraphrase, don't quote. `points` are short, paraphrased, factual statements - not \
 quotes, not whole paragraphs.
 6. Flag the messy parts. If a thread was inconclusive or contradictory, say so in a point \
 or open question rather than papering over it.
@@ -138,10 +138,10 @@ only if stated). Empty categories are empty lists, not invented content.
 9. Surface key terms. List the salient terms the meeting actually mentioned and that a reader \
 might want to look up: named entities, technologies, tools, methods, standards, organisations, \
 domain concepts. Use the canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words and \
-anything not in the transcript. Leave the wikipedia/wikidata fields null — they are filled \
+anything not in the transcript. Leave the wikipedia/wikidata fields null - they are filled \
 automatically; never invent a URL.
-10a. Summarize content, not speakers. The transcript has no speaker labels — write notes about \
-WHAT was said and decided, not a per-person, "Person A said… / Person B said…" breakdown. Only list \
+10a. Summarize content, not speakers. The transcript has no speaker labels - write notes about \
+WHAT was said and decided, not a per-person, "Person A said... / Person B said..." breakdown. Only list \
 someone in `participants` (or attribute an action item to them) when their real name is explicitly \
 stated in the conversation. Do NOT invent generic labels like "Person A"/"Speaker 1"; if no names \
 are stated, leave participants empty and attribute action items by role or leave the owner null.
@@ -334,7 +334,7 @@ def link_key_terms(summary: MeetingSummary) -> MeetingSummary:
 
 def merge_summaries(base: MeetingSummary, add: MeetingSummary) -> MeetingSummary:
     """Merge ``add`` into ``base`` (dedup), for incremental live summarization of
-    long meetings — so earlier content is never lost as new speech is summarized."""
+    long meetings - so earlier content is never lost as new speech is summarized."""
     m, a = base.meeting, add.meeting
     m.title = m.title or a.title
     m.date = m.date or a.date
@@ -473,7 +473,7 @@ def summary_to_markdown(summary: MeetingSummary, title: str | None = None) -> st
     lines: list[str] = [f"# {title or m.title or 'Meeting Notes'}", ""]
     if m.date:
         lines += [f"*Date: {m.date}*", ""]
-    # Drop anonymous diarization labels (Person A / Speaker 1) — the summary lists
+    # Drop anonymous diarization labels (Person A / Speaker 1) - the summary lists
     # only explicitly-named people, never a per-speaker breakdown.
     named = [p for p in m.participants if not _is_anon_speaker(p)]
     if named:

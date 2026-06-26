@@ -438,11 +438,13 @@ class MainWindow(QWidget):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._refresh_meetings)
         srow.addWidget(self.search_edit, 1)
-        self.team_feed_check = QCheckBox("Team meetings (shared DB)")
-        self.team_feed_check.setToolTip("Show all of your team's meetings read from the shared "
-                                        "database, not just the ones on this machine.")
-        self.team_feed_check.toggled.connect(self._refresh_meetings)
-        srow.addWidget(self.team_feed_check)
+        srow.addWidget(QLabel("Show:"))
+        self.scope_combo = QComboBox()
+        self.scope_combo.setToolTip("View your personal meetings (this device) or the shared "
+                                    "meetings of any team you've joined.")
+        self.scope_combo.currentIndexChanged.connect(self._refresh_meetings)
+        self._populate_scope_combo()
+        srow.addWidget(self.scope_combo)
         refresh = QPushButton("↻ Refresh")
         refresh.clicked.connect(self._refresh_meetings)
         srow.addWidget(refresh)
@@ -493,22 +495,50 @@ class MainWindow(QWidget):
         text = self.tabs.tabText(index).strip()
         if text.endswith("Summary"):
             self._refresh_meetings()
-        # Leaving Configuration → warm up the configured models so there's no
+        # Leaving Configuration -> warm up the configured models so there's no
         # cold-start download when the user hits Start.
         if getattr(self, "_prev_tab_text", "").endswith("Configuration") and not text.endswith("Configuration"):
             self._maybe_prewarm()
         self._prev_tab_text = text
 
     # ----- meetings table (Summary tab) -----
+    def _populate_scope_combo(self) -> None:
+        """Fill the Summary 'Show:' selector with Personal + each joined team."""
+        if not hasattr(self, "scope_combo"):
+            return
+        prev = self.scope_combo.currentData()
+        self.scope_combo.blockSignals(True)
+        self.scope_combo.clear()
+        self.scope_combo.addItem("Personal (this device)", ("personal", None))
+        try:
+            memberships = self.store.list_memberships()
+            revoked = {k.get("key_id") for k in self.store.list_team_keys() if k.get("revoked")}
+        except Exception:
+            memberships, revoked = [], set()
+        for m in memberships:
+            name = m.get("team_name") or m.get("team_id")
+            ro = m.get("key_id") in revoked or (m.get("team_id") == self.team_id and self._team_readonly)
+            label = f"Team · {name}" + ("  (read-only)" if ro else "")
+            self.scope_combo.addItem(label, ("team", m.get("team_id")))
+        # Restore previous selection, else default to the active team if joined.
+        idx = self.scope_combo.findData(prev) if prev else -1
+        if idx < 0 and self.team_id:
+            idx = self.scope_combo.findData(("team", self.team_id))
+        self.scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.scope_combo.blockSignals(False)
+
     def _refresh_meetings(self) -> None:
         if not hasattr(self, "meetings_table"):
             return
         query = (self.search_edit.text() if hasattr(self, "search_edit") else "").strip().lower()
-        team_mode = hasattr(self, "team_feed_check") and self.team_feed_check.isChecked()
+        scope = self.scope_combo.currentData() if hasattr(self, "scope_combo") else ("personal", None)
+        kind, feed_team_id = scope if scope else ("personal", None)
+        team_mode = kind == "team"
         self._team_feed = team_mode
+        self._feed_team_id = feed_team_id if team_mode else None
 
         if team_mode:
-            rows, note = self._fetch_team_meetings(query)
+            rows, note = self._fetch_team_meetings(query, feed_team_id)
             if rows is None:  # not available
                 self.meetings_table.setRowCount(0)
                 self.meetings_count.setText(note)
@@ -540,9 +570,14 @@ class MainWindow(QWidget):
             self.meetings_table.setItem(r, 4, QTableWidgetItem(status))
         self.meetings_table.setSortingEnabled(True)
         self.meetings_table.sortItems(1, Qt.SortOrder.DescendingOrder)  # latest meeting on top
-        scope = "team (shared DB)" if team_mode else "local"
+        if team_mode:
+            tname = next((m.get("team_name") for m in self.store.list_memberships()
+                          if m.get("team_id") == feed_team_id), feed_team_id)
+            scope_label = f"team “{tname}” (shared DB)"
+        else:
+            scope_label = "personal"
         self.meetings_count.setText(
-            note or (f"{len(rows)} {scope} meeting(s)"
+            note or (f"{len(rows)} {scope_label} meeting(s)"
                      + (f" matching “{query}”" if query else "") + " · click a row to open"))
 
     def _meeting_status(self, meeting_id) -> str:
@@ -562,29 +597,49 @@ class MainWindow(QWidget):
                 return "⏳ summarizing…"
             return "⏳ processing…"
         if not jobs:
-            return ""  # not tracked (e.g. an older meeting) — don't claim "done"
+            return ""  # not tracked (e.g. an older meeting) - don't claim "done"
         return "✓ done"
 
-    def _fetch_team_meetings(self, query: str):
+    def _feed_external_cfg(self, team_id):
+        """Resolve the shared-DB config to read a team's meetings from. Uses that
+        team's bundled key so you can view any joined team, not just the active one."""
+        if team_id and team_id != self.team_id:
+            from . import team
+            m = self.store.get_membership(team_id)
+            if m and m.get("key"):
+                try:
+                    return team.parse_team_key(m["key"])["external"]
+                except Exception:
+                    pass
+        return self._current_external_cfg()
+
+    def _fetch_team_meetings(self, query: str, team_id=None):
         """Return (rows, note). rows=None means the shared DB isn't available.
 
         Prefers the relational shared DB (richest). If only a graph database is
         configured for the team, read the meeting list from it over SPARQL."""
-        ext = self._current_external_cfg()
+        team_id = team_id if team_id is not None else self.team_id
+        ext = self._feed_external_cfg(team_id)
+        self._feed_cfg = ext
         rel = ext.relational
         from .external import GraphSink, structured_sink
         if rel.enabled and rel.url:
             self._team_feed_source = "relational"
             try:
-                rows = structured_sink(rel).list_meetings(team_id=self.team_id or None)
+                rows = structured_sink(rel).list_meetings(team_id=team_id or None)
             except Exception as exc:
                 return None, f"⚠ Shared DB: {exc}"
         elif ext.graph.enabled and ext.graph.query_url:
             self._team_feed_source = "graph"
             try:
-                rows = GraphSink(ext.graph).list_meetings(team_id=self.team_id or None)
+                rows = GraphSink(ext.graph).list_meetings(team_id=team_id or None)
             except Exception as exc:
-                return None, f"⚠ Shared graph DB: {exc}"
+                qurl = ext.graph.query_url
+                if "refused" in str(exc).lower() or "urlopen" in str(exc).lower():
+                    return None, (f"⚠ Can't reach the shared graph database at {qurl} — check the "
+                                  "server is running and the URL/port is correct (try Test connection "
+                                  "in Configuration). [" + str(exc) + "]")
+                return None, f"⚠ Shared graph DB ({qurl}): {exc}"
         else:
             return None, ("Enable a relational or graph shared database (with a query endpoint) "
                           "in Configuration to see team meetings.")
@@ -599,7 +654,7 @@ class MainWindow(QWidget):
         if mid is None:
             return
         if getattr(self, "_team_feed", False):
-            ext = self._current_external_cfg()
+            ext = getattr(self, "_feed_cfg", None) or self._current_external_cfg()
             try:
                 from .external import GraphSink, structured_sink
                 if getattr(self, "_team_feed_source", "relational") == "graph":
@@ -874,7 +929,7 @@ are stored locally in a protected config file.</p>
         openai_l.addWidget(self.openai_base, 1)
         self.engine_stack.addWidget(openai_w)
 
-        # OpenAI-compatible (Groq, OpenRouter, Anthropic, self-hosted, custom…)
+        # OpenAI-compatible (Groq, OpenRouter, Anthropic, self-hosted, custom...)
         compat_w = QWidget()
         compat_l = QHBoxLayout(compat_w)
         compat_l.setContentsMargins(0, 0, 0, 0)
@@ -916,7 +971,7 @@ are stored locally in a protected config file.</p>
         engine_hint.setStyleSheet("color:#64748b; font-size:11px;")
         engine_layout.addWidget(engine_hint)
 
-        # HuggingFace token — optional; only used to download local Whisper models
+        # HuggingFace token - optional; only used to download local Whisper models
         # faster / past anonymous rate limits.
         hf_row = QHBoxLayout()
         hf_row.addWidget(QLabel("HuggingFace token (optional):"))
@@ -1454,14 +1509,11 @@ are stored locally in a protected config file.</p>
         # Leave only makes sense when you're actually in a team.
         if getattr(self, "leave_btn", None) is not None:
             self.leave_btn.setVisible(in_team)
-        # "Teams…" (switch active team) only matters once you've joined more than one.
+        # "Teams..." (switch active team) only matters once you've joined more than one.
         if getattr(self, "teams_btn", None) is not None:
             self.teams_btn.setVisible(n_teams > 1)
-        # The team feed reads from the shared DB — only relevant in a team.
-        if getattr(self, "team_feed_check", None) is not None:
-            self.team_feed_check.setEnabled(in_team)
-            if not in_team and self.team_feed_check.isChecked():
-                self.team_feed_check.setChecked(False)
+        # Keep the Summary 'Show:' selector in step with the teams you belong to.
+        self._populate_scope_combo()
 
     def _fill_graph_endpoints(self) -> None:
         """Derive query/update/store URLs from the chosen DB type + base URL."""
@@ -1758,7 +1810,7 @@ are stored locally in a protected config file.</p>
         s = self.store.set_setting
         s("ai.provider", self.ai_provider.currentData() or "")
         s("ui.auto_notes", "1" if self.auto_notes.isChecked() else "0")
-        # NB: live "Auto" summary is intentionally NOT persisted — it always
+        # NB: live "Auto" summary is intentionally NOT persisted - it always
         # starts on so summaries generate automatically with no button.
         s("t.engine", self.engine_combo.currentData() or "")
         s("t.language", self.lang_edit.text())
@@ -1836,7 +1888,7 @@ are stored locally in a protected config file.</p>
         an = g("ui.auto_notes")
         if an is not None:
             self.auto_notes.setChecked(an == "1")
-        # live "Auto" summary is not restored from settings — always starts on.
+        # live "Auto" summary is not restored from settings - always starts on.
         hf = g("t.hf_token")
         if hf:
             self.hf_token_edit.setText(hf)
@@ -2100,7 +2152,7 @@ are stored locally in a protected config file.</p>
         if meeting_id is None or self._storage_mode() == "local_only":
             return
         if self._team_readonly:
-            return  # read-only team — never modify its shared DB (no content loss)
+            return  # read-only team - never modify its shared DB (no content loss)
         if self._sync_policy() != "mirror":
             return  # add/update-only: never delete remotely
         cfg = self._current_external_cfg()
@@ -2135,7 +2187,7 @@ are stored locally in a protected config file.</p>
         if self._storage_mode() == "local_only":
             return  # user chose not to sync to a remote database
         if self._team_readonly:
-            return  # active team's key is revoked — read-only, don't write to it
+            return  # active team's key is revoked - read-only, don't write to it
         cfg = self._current_external_cfg()
         if not (cfg.relational.enabled or cfg.graph.enabled):
             return
@@ -2326,7 +2378,7 @@ are stored locally in a protected config file.</p>
                                         "This team key has been revoked. Ask your team for a new one.")
                     return
             except Exception:
-                pass  # can't reach the DB to check — allow, fail later if truly unusable
+                pass  # can't reach the DB to check - allow, fail later if truly unusable
         self._apply_external_config(ext)
         self.team_id, self.team_name = parsed["id"], parsed["team"]
         self.store.set_setting("team.id", self.team_id)
@@ -2370,7 +2422,7 @@ are stored locally in a protected config file.</p>
     def _switch_team(self, team_id: str) -> None:
         """Make ``team_id`` the active team: re-apply its shared-DB config and
         recompute read-only status. Content of every joined team stays isolated
-        and accessible — switching just changes which one you're viewing/writing."""
+        and accessible - switching just changes which one you're viewing/writing."""
         from . import team
         m = self.store.get_membership(team_id)
         if not m:
@@ -2602,7 +2654,7 @@ are stored locally in a protected config file.</p>
             if stage in targets:
                 self._start_stage(mid, stage)
             else:
-                self.store.mark_job(mid, stage, "done")  # no longer applicable — clear it
+                self.store.mark_job(mid, stage, "done")  # no longer applicable - clear it
 
     def _crosslink_async(self, meeting_id, on_finish=None) -> None:
         """Let the agent link this meeting to related ones, across the team if centralized."""
@@ -2682,7 +2734,7 @@ are stored locally in a protected config file.</p>
         """For a scientific meeting, attach relevant PubMed papers + research gaps.
 
         ``force`` runs it on demand (the "Find papers" button) even when the
-        auto toggle is off — useful for meetings summarized before enabling it.
+        auto toggle is off - useful for meetings summarized before enabling it.
         """
         if meeting_id is None or (not force and not self.pubmed_enable.isChecked()):
             if on_finish:
@@ -2795,7 +2847,7 @@ are stored locally in a protected config file.</p>
             "base_url": self.ai_base.text().strip(),
         }
         # Incremental: once we have a running summary, only summarize the NEW
-        # speech and merge it in — so long meetings stay fast and nothing is lost.
+        # speech and merge it in - so long meetings stay fast and nothing is lost.
         # Use content without diarization labels: the summary describes what was
         # said, not a per-speaker breakdown (labels stay in the live transcript).
         full = self.transcript.to_content()
@@ -2804,7 +2856,7 @@ are stored locally in a protected config file.</p>
         incremental = running is not None and len(full) > done_chars
         text = full[done_chars:] if incremental else full
         if incremental and len(text.strip()) < 40:
-            # Not enough new speech to bother — just re-render what we have.
+            # Not enough new speech to bother - just re-render what we have.
             self._set_summary_status("Summary up to date.")
             return
 
@@ -2824,7 +2876,7 @@ are stored locally in a protected config file.</p>
             self._run_notes()
 
     def _on_summary_tick(self) -> None:
-        # Auto-summarize as the meeting goes — only when there's new speech.
+        # Auto-summarize as the meeting goes - only when there's new speech.
         if (self.controller.running and self.auto_refresh.isChecked()
                 and self._summary_dirty and not self._notes_busy and self._notes_ready()):
             self._run_notes()
@@ -3070,7 +3122,7 @@ are stored locally in a protected config file.</p>
 
     def _on_start(self) -> None:
         sources = []
-        # With diarization on, don't assume the recorder is the speaker — use a
+        # With diarization on, don't assume the recorder is the speaker - use a
         # neutral source label (the diarizer overrides it with Speaker N when
         # available; otherwise lines stay neutral rather than the recorder's name).
         diar_on = self.diarize_combo.currentData() == "local"
@@ -3097,7 +3149,7 @@ are stored locally in a protected config file.</p>
             QMessageBox.warning(self, "Missing key", "Enter your OpenAI API key.")
             return
 
-        # Start always begins a NEW meeting — clear the previous transcript & summary.
+        # Start always begins a NEW meeting - clear the previous transcript & summary.
         self.transcript.clear()
         self.transcript_view.clear()
         self.summary_view.clear()
@@ -3338,7 +3390,7 @@ class PrewarmWorker(QObject):
 
                 t = make_transcriber(self.transcribe_config)
                 try:
-                    t.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5s silence → forces load
+                    t.transcribe(np.zeros(8000, dtype=np.float32))  # 0.5s silence -> forces load
                 except Exception:
                     pass
                 finally:
@@ -3359,7 +3411,7 @@ class PrewarmWorker(QObject):
                     if proc.returncode == 0:
                         ready.append(self.pull_model)
                 except FileNotFoundError:
-                    pass  # ollama not installed — silently skip
+                    pass  # ollama not installed - silently skip
             self.done.emit(True, ("Models ready: " + ", ".join(ready)) if ready else "")
         except Exception as exc:
             self.done.emit(False, f"Model prep: {exc}")
@@ -3863,7 +3915,7 @@ class MeetingDetailDialog(QDialog):
 
 
 class ActivityLogDialog(QDialog):
-    """Shows the audit log — who did what, when (local; the same entries are
+    """Shows the audit log - who did what, when (local; the same entries are
     mirrored to the centralized DB when a team database is configured)."""
 
     def __init__(self, parent):
@@ -4311,7 +4363,7 @@ class SendDialog(QDialog):
 class WelcomeDialog(QDialog):
     """First-run setup: capture the user's name and an optional meeting name.
 
-    The name is shown only the first time — once saved it's reused silently.
+    The name is shown only the first time - once saved it's reused silently.
     """
 
     def __init__(self, default_name: str = "", ask_name: bool = True, default_email: str = "",

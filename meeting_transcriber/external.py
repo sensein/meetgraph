@@ -2,12 +2,12 @@
 
 Two independent, optional sinks the user configures in the app:
 
-* :class:`RelationalSink` — any SQL database reachable by a SQLAlchemy URL
-  (PostgreSQL, MySQL/MariaDB, SQLite, …). Mirrors each meeting row into a
+* :class:`RelationalSink` - any SQL database reachable by a SQLAlchemy URL
+  (PostgreSQL, MySQL/MariaDB, SQLite, ...). Mirrors each meeting row into a
   ``meetgraph_meetings`` table. Requires ``sqlalchemy`` (+ the DB driver).
 
-* :class:`GraphSink` — any SPARQL 1.1 endpoint / triplestore (Oxigraph server,
-  Apache Jena Fuseki, GraphDB, Blazegraph, …). Pushes each meeting's RDF as a
+* :class:`GraphSink` - any SPARQL 1.1 endpoint / triplestore (Oxigraph server,
+  Apache Jena Fuseki, GraphDB, Blazegraph, ...). Pushes each meeting's RDF as a
   named graph via the Graph Store Protocol (HTTP PUT) or SPARQL Update.
   Stdlib-only.
 
@@ -27,9 +27,9 @@ from dataclasses import dataclass, field
 from . import kg
 
 # --------------------------------------------------------------------------- #
-# Global meeting ids — so a shared database doesn't collide across team members.
+# Global meeting ids - so a shared database doesn't collide across team members.
 #
-# Each install uses its own local autoincrement ids (1, 2, 3, …), so two members
+# Each install uses its own local autoincrement ids (1, 2, 3, ...), so two members
 # would both push a meeting "#1" and clobber each other in the shared store. We
 # derive a stable, globally-unique id from (per-install node id, local id) before
 # pushing. Global ids live in a high range so the mapping is idempotent: a value
@@ -60,8 +60,8 @@ class RelationalConfig:
     enabled: bool = False
     kind: str = "sql"    # "sql" (SQLAlchemy) | "mongodb"
     url: str = ""        # SQLAlchemy URL, or a mongodb:// / mongodb+srv:// connection string
-    user: str = ""       # optional — injected into the SQL URL if set
-    password: str = ""   # optional — password or access token
+    user: str = ""       # optional - injected into the SQL URL if set
+    password: str = ""   # optional - password or access token
     database: str = ""   # MongoDB database name (defaults to "meetgraph")
 
 
@@ -105,7 +105,7 @@ class GraphConfig:
     enabled: bool = False
     query_url: str = ""        # SPARQL query endpoint (for connection test)
     graph_store_url: str = ""  # SPARQL Graph Store Protocol endpoint (HTTP PUT/POST/DELETE)
-    update_url: str = ""       # SPARQL Update endpoint (preferred — enables incremental replace)
+    update_url: str = ""       # SPARQL Update endpoint (preferred - enables incremental replace)
     named_graph: str = kg.MEETGRAPH_NG  # all meetings live in this one "meetgraph" named graph
     user: str = ""
     password: str = ""
@@ -382,7 +382,7 @@ class RelationalSink:
 
 
 # --------------------------------------------------------------------------- #
-# MongoDB sink (document store — Atlas or self-hosted)
+# MongoDB sink (document store - Atlas or self-hosted)
 # --------------------------------------------------------------------------- #
 class MongoSink:
     """Mirror meetings to MongoDB. One document per meeting (summary embedded),
@@ -498,7 +498,7 @@ class GraphSink:
 
         With a SPARQL Update endpoint (preferred) we delete just this meeting's
         triples and re-insert them, so re-syncing is clean. With only a Graph
-        Store endpoint we POST (merge) the triples — additive, so use
+        Store endpoint we POST (merge) the triples - additive, so use
         ``replace_all`` for a full clean re-sync.
         """
         ng = self.named_graph
@@ -506,7 +506,7 @@ class GraphSink:
         triples = kg.serialize_meeting(rec, summary, prev_ids, fmt="nt", links=links).decode("utf-8")
         if self.cfg.update_url:
             update = (
-                # Drop this meeting + all its sub-resources (topic/term/… IRIs)
+                # Drop this meeting + all its sub-resources (topic/term/... IRIs)
                 f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
                 f'FILTER(?s = <{meeting_iri}> || STRSTARTS(STR(?s), "{meeting_iri}/")) }} }} ;\n'
                 f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}"
@@ -540,12 +540,12 @@ class GraphSink:
             try:
                 self._request(self._gsp_url(), None, None, "DELETE")
             except Exception:
-                pass  # 404 if the graph doesn't exist yet — fine
+                pass  # 404 if the graph doesn't exist yet - fine
 
     def replace_all(self, records: list[dict]) -> None:
         """Replace the whole 'meetgraph' graph with the full corpus (clean re-sync).
 
-        Prefer SPARQL Update (CLEAR + INSERT) when an Update endpoint is set — it
+        Prefer SPARQL Update (CLEAR + INSERT) when an Update endpoint is set - it
         targets the named graph directly. The Graph Store PUT is used only when
         no Update URL is configured (and it must point at the store endpoint,
         e.g. Oxigraph's /store, not the server root).
@@ -589,8 +589,8 @@ class GraphSink:
         """List the team's meetings from the shared graph (newest first).
 
         Returns the same row shape as the relational sink so the UI can render
-        either source. ``summary_md`` is a marker ('✦' when the meeting has notes)
-        — the full notes are reconstructed on demand by :meth:`get_meeting`."""
+        either source. ``summary_md`` is a non-empty marker when the meeting has
+        notes; the full notes are reconstructed on demand by :meth:`get_meeting`."""
         ng = self.named_graph
         team_filter = f"?m schema:isPartOf <{kg.team_iri(team_id)}> . " if team_id else ""
         query = (
@@ -739,7 +739,7 @@ class GraphSink:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 resp.read()
             return f"SPARQL endpoint reachable: {self.cfg.query_url}"
-        # No query endpoint to probe — just report what we'll write to.
+        # No query endpoint to probe - just report what we'll write to.
         return f"Will write RDF to: {url}"
 
 

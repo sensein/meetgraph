@@ -1,13 +1,13 @@
 """Lightweight online speaker diarization.
 
 We transcribe per voice-activity segment, so diarization here means: give each
-utterance a consistent speaker label (``Speaker 1``, ``Speaker 2``, …) by
+utterance a consistent speaker label (``Speaker 1``, ``Speaker 2``, ...) by
 embedding the audio and clustering online (nearest-centroid with a similarity
 threshold). The embedding uses ``pyannote.audio`` (optional dependency, needs a
 HuggingFace token to download the model); if it isn't available, diarization is
 a no-op and we fall back to the audio-source label.
 
-This runs on the local machine — cloud transcription APIs (e.g. OpenAI) do not
+This runs on the local machine - cloud transcription APIs (e.g. OpenAI) do not
 return speaker labels, so local diarization is how speakers get separated.
 """
 
@@ -61,7 +61,7 @@ class SpeakerLabeler:
         self._embed = None
         self.backend = None
 
-        # 1) Resemblyzer — token-free, model ships with the package.
+        # 1) Resemblyzer - token-free, model ships with the package.
         try:
             from resemblyzer import VoiceEncoder
 

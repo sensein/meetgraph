@@ -2,8 +2,8 @@
 
 Two interchangeable backends behind a common ``Transcriber`` interface:
 
-* :class:`LocalWhisperTranscriber` — faster-whisper, runs fully on-device.
-* :class:`OpenAITranscriber`        — OpenAI's hosted transcription API.
+* :class:`LocalWhisperTranscriber` - faster-whisper, runs fully on-device.
+* :class:`OpenAITranscriber`        - OpenAI's hosted transcription API.
 
 Both take a 16 kHz mono float32 numpy array and return plain text.
 """

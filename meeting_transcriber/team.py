@@ -1,4 +1,4 @@
-"""Team sharing — a single shareable key that points a whole team at one
+"""Team sharing - a single shareable key that points a whole team at one
 centralized database.
 
 One person configures the external database(s) and generates a **team key**: a
@@ -7,7 +7,7 @@ graph DB connection settings. Teammates paste the key to join; their app then
 writes every meeting summary into the same centralized database, tagged with the
 team id, so the team's knowledge graph is shared.
 
-The key is base64url(JSON) with a short prefix. It is NOT encryption — it carries
+The key is base64url(JSON) with a short prefix. It is NOT encryption - it carries
 connection details (and any credentials embedded in them), so share it only over
 trusted channels, exactly like sharing a database connection string.
 """

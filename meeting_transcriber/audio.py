@@ -200,7 +200,7 @@ class CaptureWorker(threading.Thread):
         self.device = device
         self.label = label
         self.out_queue = out_queue
-        # NOTE: do not name this ``_stop`` — that shadows threading.Thread._stop()
+        # NOTE: do not name this ``_stop`` - that shadows threading.Thread._stop()
         # and breaks join().
         self._stop_event = threading.Event()
         self._raw: "queue.Queue[np.ndarray]" = queue.Queue()
@@ -212,7 +212,7 @@ class CaptureWorker(threading.Thread):
         self._stop_event.set()
 
     def _callback(self, indata, frames, time_info, status):  # noqa: ANN001
-        # Runs on the PortAudio thread — keep it light.
+        # Runs on the PortAudio thread - keep it light.
         self._raw.put(indata.copy())
 
     def run(self) -> None:

@@ -1,4 +1,4 @@
-"""Meeting knowledge graph — RDF storage and export via pyoxigraph.
+"""Meeting knowledge graph - RDF storage and export via pyoxigraph.
 
 Turns a structured ``MeetingSummary`` (as stored JSON) into RDF triples that
 conform to the Meeting Content Ontology (``skills/schemas/mco.yaml``):
@@ -11,9 +11,9 @@ conform to the Meeting Content Ontology (``skills/schemas/mco.yaml``):
 
 Two surfaces:
 
-* :func:`serialize_meeting` — build an in-memory graph from one stored meeting
+* :func:`serialize_meeting` - build an in-memory graph from one stored meeting
   and dump it as JSON-LD / Turtle / N-Quads (used by the export buttons).
-* :class:`MeetingGraph` — a persistent on-disk Oxigraph store (one named graph
+* :class:`MeetingGraph` - a persistent on-disk Oxigraph store (one named graph
   per meeting) that accumulates every meeting into a single, SPARQL-queryable
   knowledge graph across sessions.
 """
@@ -36,7 +36,7 @@ MEETGRAPH_NG = "https://tekrajchhetri.com/meetgraph"  # the "meetgraph" named gr
 def team_iri(team_id) -> str:
     return f"{BASE}team/{team_id}"
 
-# Anonymous diarization / audio-source labels — never minted as graph agents.
+# Anonymous diarization / audio-source labels - never minted as graph agents.
 _ANON_SPEAKER_RE = re.compile(
     r"^(person|speaker|participant)\s*[a-z0-9]+$|^(you|me|mic|meeting|system(\s*audio)?|unknown)$",
     re.IGNORECASE,
@@ -306,7 +306,7 @@ def quads_for_meeting(
         if gap:
             yield q(m, P_RESEARCH_GAP, Literal(gap))
 
-    # Model provenance — which software produced the transcript / notes (PROV)
+    # Model provenance - which software produced the transcript / notes (PROV)
     prov = summary.get("provenance") or {}
     for kind, label in (("transcriber", prov.get("transcription")), ("notes", prov.get("notes"))):
         if label:

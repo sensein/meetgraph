@@ -1,7 +1,7 @@
 """Automatic cross-meeting linking.
 
 After a meeting is summarized, an agent looks across the other meetings and links
-the new one to those it genuinely relates to — continuations, follow-ups, or
+the new one to those it genuinely relates to - continuations, follow-ups, or
 meetings about the same entities/topics. Links are typed and carry a one-line
 reason, and they feed both the local store and the centralized knowledge graph,
 so a team's meetings weave together over time.

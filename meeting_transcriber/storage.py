@@ -98,7 +98,7 @@ class Store:
                 )
                 """
             )
-            # Delivery state — which meetings were already sent to which destination,
+            # Delivery state - which meetings were already sent to which destination,
             # so bulk send/sync can skip what's already delivered.
             con.execute(
                 """
@@ -110,7 +110,7 @@ class Store:
                 )
                 """
             )
-            # Background enrichment jobs per meeting (cross-linking, literature…),
+            # Background enrichment jobs per meeting (cross-linking, literature...),
             # so processing can show status and resume if interrupted.
             con.execute(
                 """
@@ -137,7 +137,7 @@ class Store:
                 )
                 """
             )
-            # Audit log — who did what (create/edit/delete/sync), kept for accountability.
+            # Audit log - who did what (create/edit/delete/sync), kept for accountability.
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -179,7 +179,7 @@ class Store:
                 """
             )
         self._migrate_settings()
-        # Both DBs may hold secrets — keep them readable only by the owner.
+        # Both DBs may hold secrets - keep them readable only by the owner.
         for p in (self.path, self.config_path):
             try:
                 os.chmod(p, 0o600)
