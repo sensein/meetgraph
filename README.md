@@ -318,3 +318,8 @@ meeting_transcriber/
 
 In-app, see the **❓ Help** and **ℹ About** tabs.
 ```
+
+## License
+
+This project is licensed under the Apache License 2.0. See the [LICENSE.md](LICENSE.md) file for details.
+
