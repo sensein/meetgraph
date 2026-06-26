@@ -3,18 +3,20 @@
 # Release flow:  bump `version` in pyproject.toml → commit → tag → push the tag:
 #     git tag v0.2.0 && git push origin v0.2.0
 #
-# ONE-TIME SETUP — API token (this is what the workflow below uses):
-#   1. https://pypi.org/manage/account/token/  → create a token
-#        (scope it to the `meetgraph` project once the project exists; use an
-#         account-wide token for the very first upload, then narrow it).
-#   2. GitHub repo → Settings → Secrets and variables → Actions → New repository
-#        secret, named exactly:  PYPI_API_TOKEN   (value = the `pypi-…` token).
-#   The publish step reads it as `password: ${{ secrets.PYPI_API_TOKEN }}` below.
+# AUTH — this workflow uses an API token (PYPI_API_TOKEN repo secret), wired in
+# the publish step below. Create it at https://pypi.org/manage/account/token/
+# (account-wide for the FIRST upload, then narrow to the `meetgraph` project).
 #
-# ALTERNATIVE — Trusted Publishing (OIDC, no stored token): delete the `password:`
-#   line, add `id-token: write` under the job's `permissions:`, keep `environment: pypi`,
-#   and register the publisher on PyPI (project → Publishing → add pending publisher
-#   with this repo + workflow name `publish.yml` + environment `pypi`).
+# ALTERNATIVE — Trusted Publishing (OIDC, no stored token). Register a publisher
+# on PyPI (project → Publishing; use "pending publisher" before the project's
+# first release) whose fields EXACTLY match this repo's OIDC claims:
+#     • Owner:            sensein
+#     • Repository name:  meetgraph
+#     • Workflow name:    publish.yml      (this file's name)
+#     • Environment name: pypi             (must equal the job's `environment:`)
+# Then add `id-token: write` under the job permissions, set `environment: pypi`,
+# and remove the `password:` line. A mismatch in ANY field above is what causes
+# "invalid-publisher: ... no corresponding publisher".
 
 name: Release
 
@@ -39,8 +41,6 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # (Optional) add `environment: pypi` here to gate releases behind manual
-    # approval — works with a repository secret too.
     permissions:
       contents: read
     steps:
@@ -63,4 +63,5 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}   # the API token lives here (repo secret)
+          password: ${{ secrets.PYPI_API_TOKEN }}   # API token (repo secret); no OIDC needed
+          skip-existing: true
