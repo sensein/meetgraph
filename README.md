@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="meeting_transcriber/assets/logo.png" alt="MeetGraph" width="360">
+</p>
+
 # MeetGraph
 
 > *Turning meetings into a knowledge graph…*
@@ -24,6 +28,28 @@ and turns the conversation into structured, linked, shareable knowledge.
 - 💾 Local **SQLite** storage; searchable summary table (filter by **Personal / All / a team**, with a **Team** column); per-meeting detail windows
 - ❓ Built-in **Help** and **About** tabs
 - 🌍 Works on **macOS, Windows, and Linux**
+
+---
+
+## Screenshots
+
+**Welcome / intro** — first-run setup: your name, optional email, and a quick join field.
+
+![Intro screen](img/intro-screen.png)
+
+**Meeting** — live transcript with per-speaker labels, an auto-refreshing summary, the models banner, and the *Recording into:* team picker.
+
+![Meeting tab](img/meeting.png)
+
+**Summary** — searchable meetings table with the **Show** scope (Personal / All / a team) and **Team** column; open any row for full notes + transcript.
+
+![Summary tab](img/summary-i.png)
+
+![Meeting detail](img/summary-ii.png)
+
+**Configuration** — transcription engine + acceleration, AI notes provider, external databases, teams, email, integrations, and PubMed.
+
+![Configuration tab](img/configuration.png)
 
 ---
 
