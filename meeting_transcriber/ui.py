@@ -287,6 +287,7 @@ class MainWindow(QWidget):
         self.tabs.addTab(self._build_record_tab(), "  ◉  Meeting  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
+        self.tabs.addTab(self._build_help_tab(), "  ❓  Help  ")
         self.tabs.addTab(self._build_about_tab(), "  ℹ  About  ")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
@@ -906,6 +907,107 @@ class MainWindow(QWidget):
         scroll.setWidget(page)
         scroll.viewport().setStyleSheet("background: transparent;")
         return scroll
+
+    def _build_help_tab(self) -> QWidget:
+        view = QTextBrowser()
+        view.setObjectName("transcript")
+        view.setOpenExternalLinks(True)
+        view.setHtml(self._help_html())
+        return view
+
+    def _help_html(self) -> str:
+        return """
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; color:#1e293b; font-size:14px; line-height:1.55; }
+  h1 { font-size:22px; margin:0 0 2px 0; }
+  h2 { font-size:15px; color:#7c3aed; margin:20px 0 6px 0; }
+  h3 { font-size:13px; color:#0f766e; margin:14px 0 4px 0; }
+  .tag { color:#64748b; font-size:13px; margin:0 0 4px 0; }
+  ol, ul { margin:4px 0; padding-left:22px; }
+  li { margin:4px 0; }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:12px; }
+  table { border-collapse:collapse; margin:8px 0; width:100%; }
+  th, td { border:1px solid #e2e8f0; padding:6px 9px; text-align:left; vertical-align:top; font-size:13px; }
+  th { background:#f1f5f9; color:#475569; }
+  .tip { background:#f0fdfa; border:1px solid #99f6e4; border-radius:8px; padding:8px 12px; margin:8px 0; }
+  a { color:#2563eb; text-decoration:none; }
+</style>
+
+<h1>Help</h1>
+<p class="tag">How to use MeetGraph, and how to fix common issues.</p>
+
+<h2>Quick start</h2>
+<ol>
+  <li><b>Configure</b> (⚙): choose a transcription engine and, under <b>AI notes</b>,
+      a provider + API key. Hit the <b>Test</b> buttons to confirm. The banner on the
+      Meeting tab shows the active models and whether keys are set.</li>
+  <li><b>Record</b> (◉ Meeting): pick who to record into with <b>Recording into:</b>
+      (a team, or “No team (personal)”), then <b>● Start meeting</b>. Speak or play the
+      call. The live transcript labels voices <b>Speaker 1 / 2 / …</b>; the summary
+      refreshes automatically.</li>
+  <li><b>Review</b> (✦ Summary): browse meetings, filter with <b>Show</b>
+      (Personal / All / a team), and click a row to open notes + transcript. Rename,
+      edit, find papers, export RDF, or send.</li>
+</ol>
+
+<h2>Capturing meeting (system) audio</h2>
+<p>To transcribe the other participants, route system audio through a virtual
+loopback that appears as an input:</p>
+<ul>
+  <li><b>macOS</b> — install BlackHole (<code>brew install blackhole-2ch</code>), make a
+      Multi-Output Device (speakers + BlackHole), then pick <b>BlackHole 2ch</b>.</li>
+  <li><b>Windows</b> — enable <b>Stereo Mix</b> or install VB-Audio Cable and pick
+      <b>CABLE Output</b>.</li>
+  <li><b>Linux</b> — pick the input whose name contains <code>monitor</code>.</li>
+</ul>
+<p>Mic-only needs none of this — just leave the system-audio source unchecked.</p>
+
+<h2>Speakers</h2>
+<p>Speaker labels (Speaker 1 / 2 / …) are produced on-device and appear in the
+<b>live transcript only</b>. The <b>summary</b> describes what was said, not a
+per-person breakdown. Set <i>Configuration → Speakers</i> to <b>Label speakers
+(local)</b> (the default) to enable it.</p>
+
+<h2>Teams</h2>
+<ul>
+  <li><b>Start/join:</b> generate a key (Configuration → Team) and share it, or paste a
+      key to join. You can belong to several teams.</li>
+  <li><b>Switch / none:</b> use <b>Recording into:</b> on the Meeting tab (or
+      <b>Teams…</b>) to pick the active team or “No team (personal)”.</li>
+  <li><b>View:</b> the Summary <b>Show</b> menu lists Personal, All, and each team; the
+      <b>Team</b> column shows where each meeting belongs.</li>
+  <li><b>Leave / revoke:</b> by default you keep <b>read-only</b> access to a team's
+      notes up to the moment you left/were revoked (toggle in Configuration). A team you
+      left with a valid key <b>re-joins on selection</b> — no need to re-paste it; a
+      revoked key needs a new one.</li>
+</ul>
+
+<h2>Troubleshooting</h2>
+<table>
+  <tr><th>Symptom</th><th>Fix</th></tr>
+  <tr><td>Team feed empty / “Can't reach the shared graph database”</td>
+      <td>The shared DB server isn't reachable. Check it's running and the URL/port are
+      right, then <b>Test connection</b> in Configuration. Once reachable, <b>Sync all
+      meetings now</b> to backfill. Your own meetings still appear under the team view
+      locally even before they sync.</td></tr>
+  <tr><td>Everyone shows as one speaker</td>
+      <td>Ensure <i>Speakers</i> is set to <b>Label speakers (local)</b> and Resemblyzer
+      is installed (<code>pip install -r requirements.txt</code>). Very short or
+      overlapping speech may be mislabelled.</td></tr>
+  <tr><td>Transcription model error (e.g. <code>gpt-realtime-…</code>)</td>
+      <td>Use a real <code>/audio/transcriptions</code> model: <code>whisper-1</code>,
+      <code>gpt-4o-transcribe</code>, or <code>gpt-4o-mini-transcribe</code>.</td></tr>
+  <tr><td>“Set an API key…”</td>
+      <td>The notes provider needs a key in Configuration. The Meeting-tab banner shows
+      key status.</td></tr>
+  <tr><td>No PubMed papers</td>
+      <td>Enable <i>Scientific literature</i> (optionally add an NCBI key) in
+      Configuration, or use <b>Find papers</b> on a meeting.</td></tr>
+</table>
+
+<div class="tip">Your API keys and database credentials live in a separate, owner-only
+config database — kept apart from your meeting content.</div>
+"""
 
     def _build_about_tab(self) -> QWidget:
         view = QTextBrowser()

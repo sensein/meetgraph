@@ -6,20 +6,23 @@ A cross-platform desktop app (PyQt6) that records your **microphone** *and* the
 **meeting/system audio** (Zoom, Teams, Meet, …), transcribes both in **real time**,
 and turns the conversation into structured, linked, shareable knowledge.
 
-- 🎙️ Captures mic + system audio as separate, labelled speakers (*You* / *Meeting*)
+- 🎙️ Captures mic + system audio with **on-device speaker diarization** — distinct voices are labelled *Speaker 1 / 2 / …* in the live transcript (Resemblyzer, no token, runs locally)
 - ⚡ Live transcription with voice-activity segmentation
 - 🖥️ **Auto-detects the best accelerator** — Apple Silicon GPU (MLX), NVIDIA CUDA, or CPU
 - 🔁 Transcription engines: **Local Whisper**, **OpenAI**, or any **OpenAI-compatible** audio endpoint (Groq, self-hosted, …)
-- 🤖 **AI meeting notes** — a provider-agnostic Pydantic AI agent (Claude / OpenAI / OpenRouter / local Ollama) produces faithful notes (topics · decisions · open questions · action items), and **fixes obvious transcription errors**
+- 🤖 **AI meeting notes** — a provider-agnostic Pydantic AI agent (Claude / OpenAI / OpenRouter / local Ollama) produces faithful notes (topics · decisions · open questions · action items), **fixes obvious transcription errors**, and is **editable** (with who-edited tracking)
+- 🧾 **Model provenance** — records which transcription and notes models produced each result, in the notes and the knowledge graph; a banner shows the models + API-key status
 - 🔗 **Key terms auto-linked to Wikipedia + Wikidata** (verified, clickable)
 - 🧠 **Knowledge graph** — every meeting exported as RDF (JSON-LD / Turtle / N-Quads) conforming to the bundled **MCO** ontology, with PROV temporal data
 - 🕸️ **Automatic cross-meeting linking** — an agent connects related meetings (shared topics/entities, follow-ups, continuations)
 - 🔬 **PubMed** — for scientific discussions, links relevant publications (with a few key points each) and proposes **research gaps**
-- 👥 **Teams** — one shareable key centralizes everyone's notes in a shared database; in-app team feed; audit log of who-did-what
+- 👥 **Teams** — shareable keys centralize everyone's notes in one shared database; **join multiple teams and switch between them**; pick the team per meeting (or none) right in the Meeting tab; in-app team feed; audit log of who-did-what
+- 🔐 **Leave/revoke keeps your history** — leaving a team or having your key revoked keeps its notes viewable **read-only up to that moment** (configurable); a valid key you left **re-joins on selection** without re-pasting
 - 🗄️ **Bring your own database** — relational (PostgreSQL/MySQL/SQLite via SQLAlchemy) **or MongoDB**, and a **graph triplestore** (Oxigraph/Fuseki/GraphDB/Blazegraph) — endpoints auto-derived by type
 - 📤 **Send anywhere** — email (SMTP), REST webhook, MCP server — per-meeting or in bulk, with de-duplication
 - 🔄 Background enrichment with **status + auto-resume** if interrupted
-- 💾 Local **SQLite** storage; searchable summary table; per-meeting detail windows
+- 💾 Local **SQLite** storage; searchable summary table (filter by **Personal / All / a team**, with a **Team** column); per-meeting detail windows
+- ❓ Built-in **Help** and **About** tabs
 - 🌍 Works on **macOS, Windows, and Linux**
 
 ---
@@ -91,6 +94,12 @@ leave Configuration**, so there's no cold-start wait on Start.
 > offer one, so transcription uses Whisper/OpenAI/compatible. Your Claude/OpenRouter
 > choice is still used to write the **notes**.
 
+**Speaker diarization** (on by default, *Configuration → Speakers*): distinct voices
+are labelled *Speaker 1 / 2 / …* in the live transcript, on-device via **Resemblyzer**
+(bundled model, no token, no network). Cloud STT APIs don't return speaker labels, so
+this is how speakers get separated. Diarization labels stay in the **transcript only** —
+the **summary** describes *what was said*, not a per-person breakdown.
+
 ---
 
 ## 5. AI meeting notes
@@ -107,6 +116,12 @@ or decisions, but silently fixing obvious speech-to-text errors.
 | **OpenAI** | `gpt-4o` | default |
 | **OpenRouter** | `anthropic/claude-opus-4-8` | `https://openrouter.ai/api/v1` |
 | **Open-source / Custom** | `llama3.1` | `http://localhost:11434/v1` (Ollama/vLLM/LM Studio) |
+
+Summaries are **editable** — open a meeting, *Edit*, refine the Markdown; the editor
+(name) and time are recorded. The notes also capture **model provenance** (which
+transcription + notes models produced them), shown read-only and mirrored into the
+knowledge graph; a banner at the top of the Meeting tab shows the active models
+(open-source vs cloud) and whether the API keys are set.
 
 **Key terms** are resolved to verified **Wikipedia** articles and **Wikidata**
 entities (clickable). For **scientific** meetings (enable *Scientific literature*
@@ -150,9 +165,20 @@ links, cited publications, and team membership.
 - **Teams:** generate a shareable **team key** (bundles the shared DB config) — issue
   several, view, copy, or **revoke** them. Teammates **join** with the key (on the
   welcome screen or in Configuration) and their notes flow into the shared DB.
-  The **Team meetings (shared DB)** toggle shows everyone's meetings in-app. Every
-  action (create / summary / delete / send / sync) is recorded in an **audit log**
-  with the member's name + email, mirrored centrally.
+  Each meeting carries a globally-unique id, so members never overwrite each other.
+  - **Multiple teams & switching:** join several teams and switch the active one via
+    **Teams…** or the **Recording into:** picker in the Meeting tab (or pick *No team
+    (personal)*). The Summary tab's **Show** menu views **Personal**, **All**, or any
+    one team, and a **Team** column makes rows distinguishable. A team view also
+    includes your own local meetings tagged to it, so you see your contributions even
+    before they sync.
+  - **Leaving / revocation keeps your history:** by default, leaving a team or having
+    your key revoked keeps that team's notes viewable **read-only up to that moment**
+    (Configuration → *Keep read-only access…* toggles this). A team you **left** with a
+    still-valid key **re-joins automatically when selected** — no need to re-paste it;
+    only a **revoked** key requires a fresh one.
+  - Every action (create / summary / delete / send / sync / join / leave / revoke) is
+    recorded in an **audit log** with the member's name + email, mirrored centrally.
 
 ## 8. Sending & sharing
 
@@ -173,6 +199,7 @@ send across meetings — already-sent items are skipped (de-duplicated).
 meeting_transcriber/
   audio.py        # PortAudio capture + voice-activity segmentation
   transcribe.py   # Local (faster-whisper/MLX) + OpenAI/compatible engines; accelerator detection
+  diarize.py      # On-device speaker diarization (Resemblyzer; pyannote fallback)
   transcript.py   # Transcript model, Markdown rendering, sharing helpers
   controller.py   # Threads: capture → queue → transcription → Qt signals
   agent.py        # Provider-agnostic notes agent; key-term + PubMed enrichment
@@ -195,6 +222,19 @@ meeting_transcriber/
   utterance transcribed, so text appears a beat after you pause.
 - Larger local models are more accurate but slower; `base`/`small` are a good
   real-time balance on Apple Silicon.
-- The config database (API keys, DB credentials, team key) is kept **separate**
-  from your meeting content and is readable only by your user account.
+- The config database (API keys, DB credentials, team keys, memberships) is kept
+  **separate** from your meeting content and is readable only by your user account.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| **Team feed empty / "Can't reach the shared graph database"** | The shared DB server isn't reachable. Check it's running and the URL/port are right, then **Test connection** (Configuration → graph DB). Once reachable, **Sync all meetings now** to backfill. Your own meetings still show under the team view locally even before they sync. |
+| **Everyone shows as one speaker** | Diarization needs the bundled Resemblyzer (`pip install -r requirements.txt`); make sure *Configuration → Speakers* is set to *Label speakers (local)*. Very short or overlapping utterances may be mislabelled. |
+| **Transcription model error (e.g. `gpt-realtime-…`)** | Use a real `/audio/transcriptions` model: `whisper-1`, `gpt-4o-transcribe`, or `gpt-4o-mini-transcribe`. Realtime models aren't supported. |
+| **"Set an API key…"** | The notes provider (Claude/OpenAI/OpenRouter) needs a key in Configuration. The top-of-Meeting banner shows key status. |
+| **Joined a team but can't see meetings** | Pick the team (or **All**) in the Summary **Show** menu; confirm the shared DB is reachable (above). |
+| **Left a team — how do I get back?** | If the key isn't revoked, just pick it in the Meeting **Recording into:** picker (shown as *(rejoin)*) — it re-joins automatically. A revoked key needs a fresh one. |
+
+In-app, see the **❓ Help** and **ℹ About** tabs.
 ```
