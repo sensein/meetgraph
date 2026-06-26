@@ -176,6 +176,11 @@ _MEETING_COLS = [
     "transcript_md", "transcript_plain", "summary_md", "summary_json", "created_at",
 ]
 
+_NOTE_COLS = [
+    "id", "user", "title", "body_md", "tags", "team_id", "about_meeting_id",
+    "author_name", "author_email", "summary_json", "created_at", "updated_at",
+]
+
 
 class RelationalSink:
     def __init__(self, url: str, user: str = "", password: str = ""):
@@ -260,6 +265,34 @@ class RelationalSink:
                 Column("term", Text), Column("description", Text),
                 Column("wikipedia", Text), Column("wikidata", Text),
             ),
+            "notes": Table(
+                "meetgraph_notes", self._meta,
+                Column("id", BigInteger, primary_key=True),
+                Column("user", Text), Column("title", Text),
+                Column("body_md", Text), Column("tags", Text),
+                Column("team_id", Text, index=True),
+                Column("about_meeting_id", BigInteger),
+                Column("author_name", Text), Column("author_email", Text),
+                Column("summary_json", Text),
+                Column("created_at", Text), Column("updated_at", Text),
+            ),
+            "note_key_terms": Table(
+                "meetgraph_note_key_terms", self._meta, pk(),
+                Column("note_id", BigInteger, index=True),
+                Column("term", Text), Column("description", Text),
+                Column("wikipedia", Text), Column("wikidata", Text),
+            ),
+            "note_topics": Table(
+                "meetgraph_note_topics", self._meta, pk(),
+                Column("note_id", BigInteger, index=True),
+                Column("ord", Integer), Column("topic", Text), Column("points", Text),
+            ),
+            "note_links": Table(
+                "meetgraph_note_links", self._meta, pk(),
+                Column("note_id", BigInteger, index=True),
+                Column("target_kind", Text), Column("target_id", BigInteger),
+                Column("relation", Text), Column("reason", Text),
+            ),
         }
         self._meta.create_all(self._engine)
 
@@ -327,6 +360,73 @@ class RelationalSink:
                          "action_items", "key_terms", "meeting_links"):
                 conn.execute(delete(t[name]).where(t[name].c.meeting_id == meeting_id))
             conn.execute(delete(t["meetings"]).where(t["meetings"].c.id == meeting_id))
+
+    def upsert_note(self, rec: dict) -> None:
+        import json as _json
+
+        from sqlalchemy import delete, insert
+
+        nid = rec.get("id")
+        try:
+            summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            summary = {}
+        parent = {c: rec.get(c) for c in _NOTE_COLS}
+        terms = [
+            {"note_id": nid, "term": k.get("term"), "description": k.get("description"),
+             "wikipedia": k.get("wikipedia"), "wikidata": k.get("wikidata")}
+            for k in (summary.get("key_terms") or [])
+        ]
+        topics = [
+            {"note_id": nid, "ord": i, "topic": t.get("topic"),
+             "points": _json.dumps(t.get("points") or [])}
+            for i, t in enumerate(summary.get("topics") or [])
+        ]
+        link_rows = [
+            {"note_id": nid, "target_kind": l.get("kind"), "target_id": l.get("id"),
+             "relation": l.get("relation"), "reason": l.get("reason")}
+            for l in (rec.get("links") or []) if l.get("id") is not None
+        ]
+        t = self._t
+        with self._engine.begin() as conn:
+            for name in ("note_key_terms", "note_topics", "note_links"):
+                conn.execute(delete(t[name]).where(t[name].c.note_id == nid))
+            conn.execute(delete(t["notes"]).where(t["notes"].c.id == nid))
+            conn.execute(insert(t["notes"]).values(**parent))
+            for name, rows in (("note_key_terms", terms), ("note_topics", topics),
+                               ("note_links", link_rows)):
+                if rows:
+                    conn.execute(insert(t[name]), rows)
+
+    def delete_note(self, note_id) -> None:
+        from sqlalchemy import delete
+
+        t = self._t
+        with self._engine.begin() as conn:
+            for name in ("note_key_terms", "note_topics", "note_links"):
+                conn.execute(delete(t[name]).where(t[name].c.note_id == note_id))
+            conn.execute(delete(t["notes"]).where(t["notes"].c.id == note_id))
+
+    def list_notes(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        """List notes in the shared DB (optionally for one team), newest first."""
+        from sqlalchemy import select
+
+        t = self._t["notes"]
+        q = select(t.c.id, t.c.user, t.c.title, t.c.tags, t.c.team_id,
+                   t.c.about_meeting_id, t.c.author_name, t.c.created_at, t.c.updated_at)
+        if team_id:
+            q = q.where(t.c.team_id == team_id)
+        q = q.order_by(t.c.id.desc()).limit(limit)
+        with self._engine.connect() as conn:
+            return [dict(r) for r in conn.execute(q).mappings().all()]
+
+    def get_note(self, note_id) -> dict | None:
+        from sqlalchemy import select
+
+        t = self._t["notes"]
+        with self._engine.connect() as conn:
+            row = conn.execute(select(t).where(t.c.id == note_id)).mappings().first()
+        return dict(row) if row else None
 
     def list_meetings(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
         """List meetings in the shared DB (optionally for one team), newest first."""
@@ -450,6 +550,41 @@ class MongoSink:
     def delete_meeting(self, meeting_id) -> None:
         self._db.meetings.delete_one({"_id": meeting_id})
 
+    def upsert_note(self, rec: dict) -> None:
+        import json as _json
+
+        try:
+            summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            summary = {}
+        doc = {c: rec.get(c) for c in _NOTE_COLS}
+        doc["_id"] = rec.get("id")
+        doc["summary"] = summary
+        doc["links"] = rec.get("links") or []
+        self._db.notes.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+
+    def delete_note(self, note_id) -> None:
+        self._db.notes.delete_one({"_id": note_id})
+
+    def list_notes(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        q = {"team_id": team_id} if team_id else {}
+        cur = self._db.notes.find(
+            q, {"id": 1, "user": 1, "title": 1, "tags": 1, "team_id": 1,
+                "about_meeting_id": 1, "author_name": 1, "created_at": 1, "updated_at": 1}
+        ).sort("id", -1).limit(limit)
+        out = []
+        for d in cur:
+            d.pop("_id", None)
+            out.append(d)
+        return out
+
+    def get_note(self, note_id) -> dict | None:
+        d = self._db.notes.find_one({"_id": note_id}) or self._db.notes.find_one({"id": note_id})
+        if not d:
+            return None
+        d.pop("_id", None)
+        return d
+
     def test(self) -> str:
         self._client.admin.command("ping")
         return f"Connected to MongoDB (database: {self._db.name})"
@@ -489,9 +624,16 @@ class GraphSink:
     def named_graph(self) -> str:
         return self.cfg.named_graph or kg.MEETGRAPH_NG
 
-    def _gsp_url(self) -> str:
+    @property
+    def notes_named_graph(self) -> str:
+        """Notes live in their own named graph, adjacent to the meeting graph, so a
+        full meeting re-sync (CLEAR + INSERT) never wipes the team's notes."""
+        return self.named_graph.rstrip("/") + "/notes"
+
+    def _gsp_url(self, ng: str | None = None) -> str:
+        graph = ng or self.named_graph
         sep = "&" if "?" in self.cfg.graph_store_url else "?"
-        return f"{self.cfg.graph_store_url}{sep}graph={urllib.parse.quote(self.named_graph)}"
+        return f"{self.cfg.graph_store_url}{sep}graph={urllib.parse.quote(graph)}"
 
     def push_meeting(self, rec: dict, summary: dict, prev_ids=None, links=None) -> None:
         """Upsert one meeting into the single 'meetgraph' named graph.
@@ -530,6 +672,108 @@ class GraphSink:
                           "application/sparql-update", "POST")
         # Graph Store Protocol can't delete a sub-resource set cleanly; needs Update.
 
+    def push_note(self, rec: dict, summary: dict | None = None) -> None:
+        """Upsert one note into the shared notes named graph."""
+        ng = self.notes_named_graph
+        n_iri = kg.note_iri(rec.get("id"))
+        triples = kg.serialize_note(rec, summary, fmt="nt").decode("utf-8")
+        if self.cfg.update_url:
+            update = (
+                f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                f'FILTER(?s = <{n_iri}> || STRSTARTS(STR(?s), "{n_iri}/")) }} }} ;\n'
+                f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}"
+            )
+            self._request(self.cfg.update_url, update.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            self._request(self._gsp_url(ng), triples.encode("utf-8"),
+                          "application/n-triples", "POST")
+        else:
+            raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
+
+    def delete_note(self, note_id) -> None:
+        """Remove one note's triples from the shared notes named graph."""
+        ng = self.notes_named_graph
+        n = kg.note_iri(note_id)
+        if self.cfg.update_url:
+            upd = (f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                   f'FILTER(?s = <{n}> || STRSTARTS(STR(?s), "{n}/")) }} }}')
+            self._request(self.cfg.update_url, upd.encode("utf-8"),
+                          "application/sparql-update", "POST")
+
+    def list_notes(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
+        """List the team's notes from the shared notes graph (newest first)."""
+        ng = self.notes_named_graph
+        team_filter = f"?n schema:isPartOf <{kg.team_iri(team_id)}> . " if team_id else ""
+        query = (
+            self._PREFIXES +
+            "SELECT ?n ?title ?created ?modified "
+            '(GROUP_CONCAT(DISTINCT ?aname; separator=", ") AS ?author) WHERE { '
+            f"GRAPH <{ng}> {{ ?n a mco:Note . {team_filter}"
+            "OPTIONAL { ?n dcterms:title ?title } "
+            "OPTIONAL { ?n dcterms:created ?created } "
+            "OPTIONAL { ?n dcterms:modified ?modified } "
+            "OPTIONAL { ?n prov:wasAttributedTo ?a . ?a foaf:name ?aname } } } "
+            f"GROUP BY ?n ?title ?created ?modified ORDER BY DESC(?created) LIMIT {int(limit)}"
+        )
+        rows: list[dict] = []
+        prefix = kg.BASE + "note/"
+        for b in self._select(query):
+            n = b.get("n", {}).get("value", "")
+            if not n.startswith(prefix):
+                continue
+            tail = n[len(prefix):]
+            nid = int(tail) if tail.isdigit() else tail
+            rows.append({
+                "id": nid,
+                "title": b.get("title", {}).get("value", "") or "Note",
+                "user": b.get("author", {}).get("value", ""),
+                "author_name": b.get("author", {}).get("value", ""),
+                "created_at": b.get("created", {}).get("value", ""),
+                "updated_at": b.get("modified", {}).get("value", ""),
+                "tags": "",
+            })
+        return rows
+
+    def get_note(self, note_id) -> dict | None:
+        """Reconstruct a read-only note record from the shared notes graph."""
+        ng = self.notes_named_graph
+        n_iri = kg.note_iri(note_id)
+        query = (
+            self._PREFIXES +
+            "SELECT ?title ?body ?created ?author "
+            '(GROUP_CONCAT(DISTINCT ?term; separator="||") AS ?terms) '
+            '(GROUP_CONCAT(DISTINCT ?topic; separator="||") AS ?topics) '
+            '(GROUP_CONCAT(DISTINCT ?kw; separator="||") AS ?tags) WHERE { '
+            f"GRAPH <{ng}> {{ BIND(<{n_iri}> AS ?n) ?n a mco:Note . "
+            "OPTIONAL { ?n dcterms:title ?title } "
+            "OPTIONAL { ?n schema:text ?body } "
+            "OPTIONAL { ?n dcterms:created ?created } "
+            "OPTIONAL { ?n schema:keywords ?kw } "
+            "OPTIONAL { ?n prov:wasAttributedTo ?a . ?a foaf:name ?author } "
+            "OPTIONAL { ?n mco:has_key_term ?k . ?k skos:prefLabel ?term } "
+            "OPTIONAL { ?n mco:has_topic ?t . ?t skos:prefLabel ?topic } } } "
+            "GROUP BY ?title ?body ?created ?author"
+        )
+        bindings = self._select(query)
+        if not bindings:
+            return None
+        b = bindings[0]
+
+        def parts(key: str) -> list[str]:
+            return [s for s in (b.get(key, {}).get("value", "") or "").split("||") if s]
+
+        title = b.get("title", {}).get("value", "") or f"Note {note_id}"
+        body = b.get("body", {}).get("value", "")
+        return {
+            "id": note_id, "title": title, "body_md": body,
+            "user": b.get("author", {}).get("value", ""),
+            "author_name": b.get("author", {}).get("value", ""),
+            "created_at": b.get("created", {}).get("value", ""),
+            "tags": ", ".join(parts("tags")),
+            "_terms": parts("terms"), "_topics": parts("topics"),
+        }
+
     def clear_graph(self) -> None:
         """Empty the 'meetgraph' named graph (used before a full re-sync)."""
         ng = self.named_graph
@@ -560,6 +804,40 @@ class GraphSink:
         elif self.cfg.graph_store_url:
             body = kg.serialize_corpus(records, fmt="turtle")
             self._request(self._gsp_url(), body, "text/turtle", "PUT")  # PUT replaces graph
+        else:
+            raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
+
+    def replace_all_notes(self, notes: list[dict]) -> None:
+        """Replace the whole notes named graph with the full set of notes (clean re-sync)."""
+        import json as _json
+
+        ng = self.notes_named_graph
+        # Build the combined n-triples / turtle for all notes in one in-memory store.
+        from pyoxigraph import DefaultGraph, Store
+
+        store = Store()
+        for rec in notes:
+            try:
+                summary = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+            except Exception:
+                summary = {}
+            store.extend(list(kg.quads_for_note(rec, summary, graph=None)))
+        if self.cfg.update_url:
+            import io
+            from pyoxigraph import RdfFormat
+            buf = io.BytesIO()
+            store.dump(buf, RdfFormat.N_TRIPLES, from_graph=DefaultGraph())
+            triples = buf.getvalue().decode("utf-8")
+            update = (f"CLEAR SILENT GRAPH <{ng}> ;\n"
+                      f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}")
+            self._request(self.cfg.update_url, update.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            import io
+            from pyoxigraph import RdfFormat
+            buf = io.BytesIO()
+            store.dump(buf, RdfFormat.TURTLE, from_graph=DefaultGraph(), prefixes=kg.PREFIXES)
+            self._request(self._gsp_url(ng), buf.getvalue(), "text/turtle", "PUT")
         else:
             raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
 
@@ -770,6 +1048,49 @@ def delete_remote(meeting_id, cfg: ExternalConfig) -> dict[str, str]:
     if cfg.graph.enabled and (cfg.graph.update_url or cfg.graph.graph_store_url):
         try:
             GraphSink(cfg.graph).delete_meeting(meeting_id)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
+def push_note(rec: dict, cfg: ExternalConfig) -> dict[str, str]:
+    """Push one note to every enabled sink. Returns {sink: 'ok' | error}."""
+    results: dict[str, str] = {}
+    try:
+        summary = json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+    except Exception:
+        summary = {}
+
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).upsert_note(rec)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+
+    if cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
+        try:
+            GraphSink(cfg.graph).push_note(rec, summary)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
+
+    return results
+
+
+def delete_note_remote(note_id, cfg: ExternalConfig) -> dict[str, str]:
+    """Propagate a note deletion to every enabled external store."""
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).delete_note(note_id)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    if cfg.graph.enabled and (cfg.graph.update_url or cfg.graph.graph_store_url):
+        try:
+            GraphSink(cfg.graph).delete_note(note_id)
             results["graph"] = "ok"
         except Exception as exc:
             results["graph"] = f"{type(exc).__name__}: {exc}"
