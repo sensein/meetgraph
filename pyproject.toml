@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-meetgraph = "meeting_transcriber.ui:run"
+meetgraph = "meeting_transcriber.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tekrajchhetri/meetgraph"

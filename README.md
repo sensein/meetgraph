@@ -86,6 +86,16 @@ missing: `mlx-whisper` (Apple-GPU transcription, macOS arm64), `pyoxigraph`
 
 ## 2. Run
 
+After installing the package, a **`meetgraph`** command is available:
+
+```bash
+meetgraph                 # launch the desktop app
+meetgraph --version       # print the installed version
+meetgraph notes FILE.md   # headless: transcript -> structured notes (Markdown/JSON)
+```
+
+From a source checkout (no install):
+
 ```bash
 ./run.sh        # or:  .venv/bin/python -m meeting_transcriber
 ```
