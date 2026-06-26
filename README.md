@@ -6,9 +6,9 @@
 
 > *Turning meetings into a knowledge graph…*
 
-A cross-platform desktop app (PyQt6) that records your **microphone** *and* the
+**MeetGraph** is a cross-platform desktop app (PyQt6) that records your **microphone** *and* the
 **meeting/system audio** (Zoom, Teams, Meet, …), transcribes both in **real time**,
-and turns the conversation into structured, linked, shareable knowledge.
+and turns the conversation into structured, linked, shareable knowledge. Additionally, **MeetGraph** also lets you create a note, link to meetings and visualize it meeting, notes as knowledge graphs.
 
 - 🎙️ Captures mic + system audio with **on-device speaker diarization** — distinct voices are labelled *Speaker 1 / 2 / …* in the live transcript (Resemblyzer, no token, runs locally)
 - ⚡ Live transcription with voice-activity segmentation
