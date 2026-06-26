@@ -193,9 +193,14 @@ as RDF under the MCO ontology's new **`Note`** class.
   named graph (`…/meetgraph/notes`), so a full meeting re-sync never disturbs them.
 - **Link to a meeting:** set **About meeting** to connect a note to the meeting it concerns
   (a `dcterms:relation` edge to that meeting in the graph).
-- **Browse & export:** the Notes **Show** menu views **Personal / All / a team** (like Summary);
-  teammates' shared notes open read-only. **Export RDF…** writes a single note's graph
-  (JSON-LD / Turtle / N-Quads). Notes are included in **Sync all … now** backfills.
+- **Write like a doc:** the note editor is WYSIWYG — **Ctrl+B**/**Ctrl+I** and a toolbar give
+  bold, italic, headings, lists, quotes, code and links, and it's stored as Markdown. A
+  **⟨⟩ Markdown** toggle lets you type raw Markdown that renders when you switch back.
+- **Clean view & export:** once saved, a note opens as a clean rendered page (body + its
+  knowledge graph), with the **same options as a meeting summary** — **Export PDF**,
+  **Export .md**, **Export RDF** (JSON-LD / Turtle / N-Quads), and **Email**. The Notes
+  **Show** menu views **Personal / All / a team**; teammates' shared notes open read-only.
+  Notes are included in **Sync all … now** backfills.
 
 ## 8. Storage, databases & teams
 

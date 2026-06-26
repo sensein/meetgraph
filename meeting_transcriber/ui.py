@@ -10,7 +10,16 @@ from pathlib import Path
 import threading
 
 from PyQt6.QtCore import Qt, QObject, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QTextCursor
+from PyQt6.QtGui import (
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+    QTextCharFormat,
+    QTextCursor,
+    QTextListFormat,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -219,6 +228,14 @@ QTextEdit#transcript:focus { border: 1px solid #2563eb; }
     border-radius: 12px;
     padding: 6px;
 }
+/* Markdown editor formatting toolbar */
+#MDToolbar { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 9px; }
+QPushButton#mdtool {
+    background: transparent; border: none; border-radius: 6px;
+    padding: 4px 8px; min-width: 16px; color: #334155; font-size: 14px;
+}
+QPushButton#mdtool:hover { background: #e2e8f0; }
+QPushButton#mdtool:checked { background: #2563eb; color: #ffffff; }
 
 #statusBar {
     background: #ffffff;
@@ -1399,9 +1416,13 @@ bundled MCO ontology's <code>Note</code> class.</p>
       <b>Team</b>) — it's pushed to the shared relational + graph databases, tagged to the team.</li>
   <li><b>Link to a meeting:</b> set <b>About meeting</b> to connect a note to the meeting it
       concerns (a <code>dcterms:relation</code> edge in the graph).</li>
-  <li><b>Export / view:</b> <b>Export RDF…</b> writes the note's graph (JSON-LD / Turtle).
-      The Notes <b>Show</b> menu views Personal / All / a team, just like Summary; shared
-      notes from teammates open read-only.</li>
+  <li><b>Write like a doc:</b> the editor is WYSIWYG — <b>Ctrl+B</b>/<b>Ctrl+I</b> and the
+      toolbar give bold, italic, headings, lists, quotes, code and links; it's saved as Markdown.
+      Prefer Markdown? Click <b>⟨⟩ Markdown</b> to type it raw — it renders when you toggle back.</li>
+  <li><b>Clean view + export:</b> once saved, a note opens as a clean rendered page (body +
+      its knowledge graph). Export to <b>PDF</b>, <b>Markdown</b>, or <b>RDF</b>, or <b>Email</b>
+      it — the same options as a meeting summary. The Notes <b>Show</b> menu views Personal /
+      All / a team; shared notes from teammates open read-only.</li>
 </ul>
 
 <h2>Capturing meeting (system) audio</h2>
@@ -4739,13 +4760,226 @@ class MeetingDetailDialog(QDialog):
         self.accept()
 
 
-class NoteEditorDialog(QDialog):
-    """Create / view / edit a personal or team note.
+class MarkdownEditor(QWidget):
+    """A Word-like rich-text editor that stores Markdown.
 
-    On Save the note is persisted locally and an AI pass extracts its key terms
-    (linked to Wikipedia/Wikidata) and topics into the same knowledge graph as
-    meetings; if a team is selected (or the note is shared to one) it is synced
-    into the team's shared database. Shared (remote) notes open read-only.
+    - WYSIWYG formatting via a toolbar and standard shortcuts (Ctrl+B / I / U).
+    - Loads Markdown (``set_markdown``) and renders it as formatted text.
+    - Exports Markdown (``to_markdown``) using Qt's round-tripping converter.
+    - A "⟨⟩ Markdown" toggle flips to a raw-Markdown source view for people who
+      prefer typing Markdown directly; flipping back renders it.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._source = False
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        bar = QFrame(); bar.setObjectName("MDToolbar")
+        bl = QHBoxLayout(bar); bl.setContentsMargins(6, 4, 6, 4); bl.setSpacing(2)
+        self._tools: list[QPushButton] = []
+
+        def tool(glyph, tip, slot, checkable=False, font=None):
+            b = QPushButton(glyph)
+            b.setObjectName("mdtool")
+            b.setToolTip(tip)
+            b.setCheckable(checkable)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if font:
+                b.setFont(font)
+            b.clicked.connect(slot)
+            bl.addWidget(b)
+            self._tools.append(b)
+            return b
+
+        bold_f = QFont(); bold_f.setBold(True)
+        ital_f = QFont(); ital_f.setItalic(True)
+        self._b_bold = tool("B", "Bold (Ctrl+B)", self._bold, True, bold_f)
+        self._b_ital = tool("I", "Italic (Ctrl+I)", self._italic, True, ital_f)
+        self._b_strike = tool("S̶", "Strikethrough", self._strike, True)
+        self._b_code = tool("</>", "Inline code", self._code, True)
+        bl.addWidget(self._sep())
+        self._b_h1 = tool("H1", "Heading 1", lambda: self._heading(1), True)
+        self._b_h2 = tool("H2", "Heading 2", lambda: self._heading(2), True)
+        bl.addWidget(self._sep())
+        tool("•", "Bullet list", self._bullets)
+        tool("1.", "Numbered list", self._numbers)
+        tool("❝", "Quote", self._quote)
+        tool("🔗", "Insert link", self._link)
+        bl.addStretch()
+        self._b_src = tool("⟨⟩ Markdown", "Toggle raw Markdown source", self._toggle_source, True)
+        outer.addWidget(bar)
+
+        self.editor = QTextEdit()
+        self.editor.setObjectName("transcript")
+        self.editor.setAcceptRichText(True)
+        self.editor.setMinimumHeight(300)
+        self.editor.setFont(QFont("SF Pro Text", 13))
+        self.editor.setPlaceholderText(
+            "Write your note here. Use the toolbar (or Ctrl+B / Ctrl+I), or click ⟨⟩ Markdown to "
+            "type Markdown directly — it renders when you toggle back.")
+        self.editor.cursorPositionChanged.connect(self._sync_toggles)
+        outer.addWidget(self.editor, 1)
+
+        # Standard keyboard shortcuts (Word-like).
+        for seq, fn in ((QKeySequence.StandardKey.Bold, self._bold),
+                        (QKeySequence.StandardKey.Italic, self._italic),
+                        (QKeySequence.StandardKey.Underline, self._underline)):
+            QShortcut(seq, self.editor, activated=fn)
+
+    @staticmethod
+    def _sep() -> QFrame:
+        s = QFrame(); s.setFrameShape(QFrame.Shape.VLine)
+        s.setStyleSheet("color:#e2e8f0;")
+        return s
+
+    # --- content I/O ---
+    def set_markdown(self, md: str) -> None:
+        self._source = False
+        self._b_src.setChecked(False)
+        self.editor.setAcceptRichText(True)
+        self.editor.setFont(QFont("SF Pro Text", 13))
+        self.editor.setMarkdown(md or "")
+        self._set_tools_enabled(True)
+
+    def to_markdown(self) -> str:
+        if self._source:
+            return self.editor.toPlainText()
+        return self.editor.document().toMarkdown().strip() + "\n"
+
+    def set_read_only(self, ro: bool) -> None:
+        self.editor.setReadOnly(ro)
+        for b in self._tools:
+            b.setEnabled(not ro)
+
+    # --- source toggle ---
+    def _toggle_source(self) -> None:
+        if not self._source:  # rich -> raw markdown source
+            md = self.editor.document().toMarkdown()
+            self._source = True
+            self.editor.setAcceptRichText(False)
+            self.editor.setFont(QFont("Menlo, monospace", 12))
+            self.editor.setPlainText(md)
+            self._set_tools_enabled(False)
+        else:  # raw -> rendered
+            md = self.editor.toPlainText()
+            self.set_markdown(md)
+        self._b_src.setChecked(self._source)
+
+    def _set_tools_enabled(self, on: bool) -> None:
+        for b in self._tools:
+            if b is not self._b_src:
+                b.setEnabled(on)
+
+    # --- formatting ---
+    def _bold(self) -> None:
+        if self._source:
+            return
+        w = QFont.Weight.Normal if self.editor.fontWeight() > QFont.Weight.Normal else QFont.Weight.Bold
+        self.editor.setFontWeight(w)
+        self._sync_toggles()
+
+    def _italic(self) -> None:
+        if self._source:
+            return
+        self.editor.setFontItalic(not self.editor.fontItalic())
+        self._sync_toggles()
+
+    def _underline(self) -> None:
+        if self._source:
+            return
+        self.editor.setFontUnderline(not self.editor.fontUnderline())
+
+    def _strike(self) -> None:
+        if self._source:
+            return
+        fmt = QTextCharFormat()
+        fmt.setFontStrikeOut(not self.editor.currentCharFormat().fontStrikeOut())
+        self.editor.textCursor().mergeCharFormat(fmt)
+        self.editor.mergeCurrentCharFormat(fmt)
+        self._sync_toggles()
+
+    def _code(self) -> None:
+        if self._source:
+            return
+        cur = self.editor.currentCharFormat()
+        on = "mono" not in (cur.fontFamilies() or [""])[0].lower() if cur.fontFamilies() else True
+        fmt = QTextCharFormat()
+        fmt.setFontFamilies(["Menlo", "monospace"] if on else ["SF Pro Text"])
+        self.editor.textCursor().mergeCharFormat(fmt)
+        self.editor.mergeCurrentCharFormat(fmt)
+
+    def _heading(self, level: int) -> None:
+        if self._source:
+            return
+        cur = self.editor.textCursor()
+        bf = cur.blockFormat()
+        new_level = 0 if bf.headingLevel() == level else level
+        bf.setHeadingLevel(new_level)
+        cur.mergeBlockFormat(bf)
+        # Visually scale the heading text (toMarkdown keys off headingLevel).
+        cf = QTextCharFormat()
+        cf.setFontWeight(QFont.Weight.Bold if new_level else QFont.Weight.Normal)
+        cf.setProperty(QTextCharFormat.Property.FontSizeAdjustment, (3 - level) if new_level else 0)
+        blk = QTextCursor(cur.block())
+        blk.select(QTextCursor.SelectionType.BlockUnderCursor)
+        blk.mergeCharFormat(cf)
+        self._sync_toggles()
+
+    def _bullets(self) -> None:
+        if not self._source:
+            self.editor.textCursor().createList(QTextListFormat.Style.ListDisc)
+
+    def _numbers(self) -> None:
+        if not self._source:
+            self.editor.textCursor().createList(QTextListFormat.Style.ListDecimal)
+
+    def _quote(self) -> None:
+        if self._source:
+            return
+        # Qt has no first-class blockquote; emit one as a '>' prefix on the line(s),
+        # which round-trips through Markdown.
+        cur = self.editor.textCursor()
+        cur.beginEditBlock()
+        cur.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        if not cur.block().text().startswith(">"):
+            cur.insertText("> ")
+        cur.endEditBlock()
+
+    def _link(self) -> None:
+        if self._source:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+
+        cur = self.editor.textCursor()
+        text = cur.selectedText() or ""
+        url, ok = QInputDialog.getText(self, "Insert link", "URL:")
+        if not ok or not url.strip():
+            return
+        label = text or url.strip()
+        cur.insertMarkdown(f"[{label}]({url.strip()})")
+
+    def _sync_toggles(self) -> None:
+        if self._source:
+            return
+        self._b_bold.setChecked(self.editor.fontWeight() > QFont.Weight.Normal)
+        self._b_ital.setChecked(self.editor.fontItalic())
+        self._b_strike.setChecked(self.editor.currentCharFormat().fontStrikeOut())
+        lvl = self.editor.textCursor().blockFormat().headingLevel()
+        self._b_h1.setChecked(lvl == 1)
+        self._b_h2.setChecked(lvl == 2)
+
+
+class NoteEditorDialog(QDialog):
+    """View / create / edit a personal or team note.
+
+    Existing notes open in a **clean rendered view** (the note plus its extracted
+    knowledge graph). **Edit** reveals a Word-like rich-text editor. On save an AI
+    pass links key terms to Wikipedia/Wikidata and files the note into the graph.
+    The note can be exported to **PDF**, **Markdown**, or **RDF**, or **emailed** —
+    the same options as a meeting summary. Shared (remote) notes open read-only.
     """
 
     def __init__(self, parent, rec: dict | None = None, remote: bool = False):
@@ -4755,29 +4989,28 @@ class NoteEditorDialog(QDialog):
         self._rec = dict(rec or {})
         self._nid = self._rec.get("id")
         self._new = rec is None
+        self._editing = self._new and not remote
         title = self._rec.get("title") or ("New note" if self._new else "Note")
         self.setWindowTitle(f"MeetGraph — {title}" + ("  (shared)" if remote else ""))
         self.setWindowIcon(app_icon())
-        self.resize(780, 760)
+        self.setMinimumSize(640, 560)
+        self.resize(860, 860)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(20, 18, 20, 18)
-        v.setSpacing(12)
+        v.setSpacing(10)
 
-        head = QLabel("Shared note (read-only)" if remote else
-                      ("New note" if self._new else "Edit note"))
-        head.setObjectName("HeaderTitle")
-        v.addWidget(head)
-        sub = QLabel("Read-only — shared by a teammate." if remote else
-                     "Write freely. On save, an AI pass links key terms to Wikipedia/Wikidata "
-                     "and files the note into the knowledge graph.")
-        sub.setObjectName("HeaderSubtitle")
-        sub.setWordWrap(True)
-        v.addWidget(sub)
+        self._head = QLabel(title)
+        self._head.setObjectName("HeaderTitle")
+        v.addWidget(self._head)
+        self._sub = QLabel("")
+        self._sub.setObjectName("HeaderSubtitle")
+        self._sub.setWordWrap(True)
+        v.addWidget(self._sub)
 
-        # --- top fields, grouped in a white card ---
-        card = QFrame(); card.setObjectName("Card")
-        form = QFormLayout(card)
+        # --- fields card (edit mode only) ---
+        self._card = QFrame(); self._card.setObjectName("Card")
+        form = QFormLayout(self._card)
         form.setContentsMargins(16, 14, 16, 14)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
@@ -4790,83 +5023,81 @@ class NoteEditorDialog(QDialog):
         self.title_edit = QLineEdit(self._rec.get("title") or "")
         self.title_edit.setPlaceholderText("Note title")
         form.addRow(_flabel("Title"), self.title_edit)
-
         self.team_combo = QComboBox()
         self.team_combo.setToolTip("Keep the note personal, or share it into a team's shared database.")
         self._populate_team_combo()
         form.addRow(_flabel("Team"), self.team_combo)
-
         self.meeting_combo = QComboBox()
         self.meeting_combo.setToolTip("Optionally link this note to a meeting it's about.")
         self._populate_meeting_combo()
         form.addRow(_flabel("About meeting"), self.meeting_combo)
-
         self.tags_edit = QLineEdit(self._rec.get("tags") or "")
         self.tags_edit.setPlaceholderText("comma, separated, tags")
         form.addRow(_flabel("Tags"), self.tags_edit)
-        v.addWidget(card)
+        v.addWidget(self._card)
 
-        body_label = QLabel("NOTE  ·  MARKDOWN")
-        body_label.setObjectName("SectionLabel")
-        v.addWidget(body_label)
-        self.body_edit = QTextEdit()
-        self.body_edit.setObjectName("transcript")
-        self.body_edit.setPlainText(self._rec.get("body_md") or "")
-        self.body_edit.setFont(QFont("SF Pro Text", 13))
-        self.body_edit.setPlaceholderText("Write your note here… Markdown is supported.")
-        v.addWidget(self.body_edit, 2)
+        # --- rendered clean view (view mode) ---
+        self._view = QTextBrowser()
+        self._view.setObjectName("transcript")
+        self._view.setOpenExternalLinks(True)
+        self._view.setFont(QFont("SF Pro Text", 13))
+        v.addWidget(self._view, 1)
 
-        kg_label = QLabel("KNOWLEDGE GRAPH  ·  AUTO-EXTRACTED ON SAVE")
-        kg_label.setObjectName("SectionLabel")
-        v.addWidget(kg_label)
-        self.kg_view = QTextBrowser()
-        self.kg_view.setObjectName("KGCard")
-        self.kg_view.setOpenExternalLinks(True)
-        self.kg_view.setMaximumHeight(180)
-        self.kg_view.setFont(QFont("SF Pro Text", 13))
-        v.addWidget(self.kg_view, 1)
-        self._refresh_kg_view()
+        # --- rich editor (edit mode) ---
+        self._editor = MarkdownEditor()
+        self._editor.set_markdown(self._rec.get("body_md") or "")
+        v.addWidget(self._editor, 3)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color:#0d9488; font-size:11px; font-weight:600;")
         v.addWidget(self.status)
 
+        # --- buttons ---
         row = QHBoxLayout(); row.setSpacing(8)
-        if not remote:
-            self.save_btn = QPushButton("Save  +  enrich")
-            self.save_btn.setObjectName("primary")
-            self.save_btn.setToolTip("Save the note and extract its key terms/topics into the knowledge graph")
-            self.save_btn.clicked.connect(self._save)
-            row.addWidget(self.save_btn)
-            share = QPushButton("Share to team…")
-            share.setToolTip("Share this personal note into a team's shared database")
-            share.clicked.connect(self._share_to_team)
-            row.addWidget(share)
-        copy = QPushButton("Copy")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(
-            self.body_edit.toPlainText() if not remote else (self._rec.get("body_md") or "")))
-        row.addWidget(copy)
-        rdf = QPushButton("Export RDF…")
-        rdf.setToolTip("Export this note as a knowledge graph (JSON-LD / Turtle), key terms linked "
-                       "to Wikipedia/Wikidata.")
-        rdf.clicked.connect(self._export_rdf)
-        row.addWidget(rdf)
+        self._btn_edit = QPushButton("✎ Edit")
+        self._btn_edit.setObjectName("primary")
+        self._btn_edit.clicked.connect(self._enter_edit)
+        row.addWidget(self._btn_edit)
+        self._btn_save = QPushButton("Save  +  enrich")
+        self._btn_save.setObjectName("primary")
+        self._btn_save.setToolTip("Save the note and extract its key terms/topics into the knowledge graph")
+        self._btn_save.clicked.connect(self._save)
+        row.addWidget(self._btn_save)
+        self._btn_cancel = QPushButton("Cancel")
+        self._btn_cancel.clicked.connect(self._cancel_edit)
+        row.addWidget(self._btn_cancel)
+        self._btn_share = QPushButton("Share to team…")
+        self._btn_share.setToolTip("Share this personal note into a team's shared database")
+        self._btn_share.clicked.connect(self._share_to_team)
+        row.addWidget(self._btn_share)
+        self._btn_pdf = QPushButton("Export PDF…")
+        self._btn_pdf.clicked.connect(self._export_pdf)
+        row.addWidget(self._btn_pdf)
+        self._btn_md = QPushButton("Export .md")
+        self._btn_md.clicked.connect(self._export_md)
+        row.addWidget(self._btn_md)
+        self._btn_rdf = QPushButton("Export RDF…")
+        self._btn_rdf.setToolTip("Export this note as a knowledge graph (JSON-LD / Turtle).")
+        self._btn_rdf.clicked.connect(self._export_rdf)
+        row.addWidget(self._btn_rdf)
+        self._btn_email = QPushButton("Email…")
+        self._btn_email.clicked.connect(self._email)
+        row.addWidget(self._btn_email)
+        self._btn_copy = QPushButton("Copy")
+        self._btn_copy.clicked.connect(self._copy)
+        row.addWidget(self._btn_copy)
         row.addStretch()
-        if not remote:
-            delete = QPushButton("Delete")
-            delete.setObjectName("danger")
-            delete.clicked.connect(self._delete)
-            row.addWidget(delete)
+        self._btn_delete = QPushButton("Delete")
+        self._btn_delete.setObjectName("danger")
+        self._btn_delete.clicked.connect(self._delete)
+        row.addWidget(self._btn_delete)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         row.addWidget(close)
         v.addLayout(row)
 
-        if remote:
-            for w in (self.title_edit, self.tags_edit, self.body_edit,
-                      self.team_combo, self.meeting_combo):
-                w.setEnabled(False)
-            self.body_edit.setReadOnly(True)
+        self._render_view()
+        self._apply_mode()
 
     # --- combos ---
     def _active_teams(self) -> list[tuple]:
@@ -4886,12 +5117,11 @@ class NoteEditorDialog(QDialog):
         cur = self._rec.get("team_id")
         if cur:
             idx = self.team_combo.findData(cur)
-            if idx < 0:  # team not in active list (e.g. a left team) - show it anyway
+            if idx < 0:
                 self.team_combo.addItem(f"Team · {self._parent._team_name(cur)}", cur)
                 idx = self.team_combo.findData(cur)
             self.team_combo.setCurrentIndex(idx)
-        elif not self._rec and self._parent.team_id:
-            # New note: default to the active team if one is selected.
+        elif self._new and self._parent.team_id:
             idx = self.team_combo.findData(self._parent.team_id)
             self.team_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -4909,35 +5139,75 @@ class NoteEditorDialog(QDialog):
             idx = self.meeting_combo.findData(cur)
             self.meeting_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
-    # --- knowledge-graph preview ---
+    # --- mode handling ---
+    def _apply_mode(self) -> None:
+        editing = self._editing
+        self._card.setVisible(editing)
+        self._editor.setVisible(editing)
+        self._view.setVisible(not editing)
+        self._btn_save.setVisible(editing)
+        self._btn_cancel.setVisible(editing and not self._new)
+        self._btn_edit.setVisible(not editing and not self._remote)
+        for b in (self._btn_share,):
+            b.setVisible(not editing and not self._remote)
+        for b in (self._btn_pdf, self._btn_md, self._btn_rdf, self._btn_email, self._btn_copy):
+            b.setVisible(not editing)
+        self._btn_delete.setVisible(not self._remote)
+        self._update_subtitle()
+
+    def _enter_edit(self) -> None:
+        if self._remote:
+            return
+        self._editing = True
+        self._editor.set_markdown(self._rec.get("body_md") or "")
+        self.title_edit.setText(self._rec.get("title") or "")
+        self.tags_edit.setText(self._rec.get("tags") or "")
+        self._apply_mode()
+
+    def _cancel_edit(self) -> None:
+        if self._new:
+            self.reject()
+            return
+        self._editing = False
+        self._apply_mode()
+
+    def _update_subtitle(self) -> None:
+        scope = self._parent._team_name(self._rec.get("team_id")) if self._rec.get("team_id") else "Personal"
+        who = self._rec.get("author_name") or self._rec.get("user") or ""
+        when = (self._rec.get("updated_at") or self._rec.get("created_at") or "")[:16].replace("T", " ")
+        bits = [f"📁 {scope}"]
+        if who:
+            bits.append(f"✍ {who}")
+        if when:
+            bits.append(f"🕜 {when}")
+        if self._rec.get("tags"):
+            bits.append(f"🏷 {self._rec['tags']}")
+        self._sub.setText("   ·   ".join(bits))
+
+    # --- knowledge-graph rendering ---
     def _enrichment(self) -> dict:
         import json as _json
+
         raw = self._rec.get("summary_json")
         if raw:
             try:
                 return _json.loads(raw)
             except Exception:
                 pass
-        # Remote notes come with reconstructed term/topic lists instead of JSON.
         if self._rec.get("_terms") or self._rec.get("_topics"):
             return {"key_terms": [{"term": t} for t in self._rec.get("_terms") or []],
                     "topics": [{"topic": t} for t in self._rec.get("_topics") or []]}
         return {}
 
-    def _refresh_kg_view(self) -> None:
+    def _kg_markdown(self) -> str:
         s = self._enrichment()
-        terms = s.get("key_terms") or []
-        topics = s.get("topics") or []
-        pubs = s.get("publications") or []
-        gaps = s.get("research_gaps") or []
+        terms, topics = s.get("key_terms") or [], s.get("topics") or []
+        pubs, gaps = s.get("publications") or [], s.get("research_gaps") or []
         if not (terms or topics or pubs or gaps):
-            self.kg_view.setMarkdown(
-                "_Not yet enriched — Save the note to extract key terms and link them to "
-                "Wikipedia/Wikidata._" if not self._remote else "_No extracted terms for this note._")
-            return
+            return ""
         md: list[str] = []
         if terms:
-            md.append("**Key terms**")
+            md.append("### Key terms")
             for kt in terms:
                 term = kt.get("term") or ""
                 label = f"[{term}]({kt.get('wikipedia')})" if kt.get("wikipedia") else term
@@ -4945,37 +5215,45 @@ class NoteEditorDialog(QDialog):
                 md.append(f"- {label}{gloss}")
             md.append("")
         if topics:
-            md.append("**Topics**")
+            md.append("### Topics")
             for t in topics:
-                md.append(f"- {t.get('topic') or ''}")
+                pts = "; ".join(t.get("points") or [])
+                md.append(f"- **{t.get('topic') or ''}**" + (f" — {pts}" if pts else ""))
             md.append("")
         if pubs:
-            md.append("**Related publications**")
+            md.append("### Related publications")
             for p in pubs:
                 cite = f"[{p.get('title')}]({p.get('url')})" if p.get("url") else (p.get("title") or "")
                 md.append(f"- {cite}")
             md.append("")
         if gaps:
-            md.append("**Research gaps**")
+            md.append("### Research gaps")
             md += [f"- {g}" for g in gaps]
-        self.kg_view.setMarkdown("\n".join(md))
+        return "\n".join(md)
+
+    def _full_markdown(self) -> str:
+        """The clean note: title + body + the extracted knowledge graph."""
+        title = self._rec.get("title") or "Note"
+        body = self._rec.get("body_md") or "_Empty note._"
+        md = f"# {title}\n\n{body.strip()}\n"
+        kg_md = self._kg_markdown()
+        if kg_md:
+            md += "\n---\n\n## Knowledge graph\n\n" + kg_md + "\n"
+        return md
+
+    def _render_view(self) -> None:
+        self._view.setMarkdown(self._full_markdown())
 
     # --- actions ---
-    def _selected_team_id(self):
-        return self.team_combo.currentData()
-
-    def _selected_meeting_id(self):
-        return self.meeting_combo.currentData()
-
     def _save(self) -> None:
         if self._remote:
             return
         p = self._parent
         title = self.title_edit.text().strip() or "Untitled note"
-        body = self.body_edit.toPlainText()
+        body = self._editor.to_markdown()
         tags = self.tags_edit.text().strip()
-        team_id = self._selected_team_id()
-        about = self._selected_meeting_id()
+        team_id = self.team_combo.currentData()
+        about = self.meeting_combo.currentData()
         try:
             if self._new or self._nid is None:
                 self._nid = p.store.save_note(
@@ -4994,9 +5272,13 @@ class NoteEditorDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Save failed", f"Could not save the note: {exc}")
             return
-        self.setWindowTitle(f"MeetGraph — {title}")
         self._rec = p.store.get_note(self._nid) or self._rec
+        self._head.setText(title)
+        self.setWindowTitle(f"MeetGraph — {title}")
         p._open_notes[self._nid] = self
+        self._editing = False
+        self._render_view()
+        self._apply_mode()
         self.status.setText("Saved · enriching into the knowledge graph…")
         p._enrich_note_async(self._nid)
         p._refresh_notes()
@@ -5009,16 +5291,74 @@ class NoteEditorDialog(QDialog):
             QMessageBox.information(self, "No teams",
                                    "Join a team in Configuration first, then share notes to it.")
             return
+        if self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note, then share it to a team.")
+            return
         names = [t[0] for t in teams]
         choice, ok = QInputDialog.getItem(self, "Share to team",
                                           "Share this note into the shared database of:", names, 0, False)
         if not ok:
             return
         tid = dict((n, i) for n, i in teams).get(choice)
-        idx = self.team_combo.findData(tid)
-        if idx >= 0:
-            self.team_combo.setCurrentIndex(idx)
-        self._save()  # persists the team change, then enriches + syncs
+        try:
+            self._parent.store.set_note_team(self._nid, tid)
+            self._parent._audit("note_shared", self._nid, self._parent._team_name(tid))
+            self._rec = self._parent.store.get_note(self._nid) or self._rec
+        except Exception as exc:
+            QMessageBox.warning(self, "Share failed", str(exc))
+            return
+        self._update_subtitle()
+        self.status.setText(f"Shared to {self._parent._team_name(tid)} · syncing…")
+        self._parent._push_note_external_async(self._nid)
+        self._parent._refresh_notes()
+
+    def _export_md(self) -> None:
+        if self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before exporting it.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export note", f"note-{self._nid}.md", "Markdown (*.md)")
+        if not path:
+            return
+        if not path.endswith(".md"):
+            path += ".md"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._full_markdown())
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        reveal_in_file_manager(path)
+
+    def _export_pdf(self) -> None:
+        if self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before exporting it.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export note as PDF", f"note-{self._nid}.pdf", "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.endswith(".pdf"):
+            path += ".pdf"
+        try:
+            from PyQt6.QtCore import QSizeF
+            from PyQt6.QtGui import QPageSize, QPdfWriter, QTextDocument
+
+            doc = QTextDocument()
+            doc.setDefaultStyleSheet(
+                "body{font-family:-apple-system,'SF Pro Text',sans-serif;color:#1f2733;}"
+                "h1{color:#0f172a;} h2,h3{color:#0f766e;} a{color:#2563eb;}")
+            doc.setHtml(self._parent._md_to_html(self._full_markdown()))
+            writer = QPdfWriter(path)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setResolution(96)
+            rect = writer.pageLayout().paintRectPoints()
+            doc.setPageSize(QSizeF(rect.width(), rect.height()))
+            doc.print(writer)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not write PDF: {exc}")
+            return
+        reveal_in_file_manager(path)
 
     def _export_rdf(self) -> None:
         from . import kg
@@ -5043,13 +5383,26 @@ class NoteEditorDialog(QDialog):
             fmt = {"JSON-LD (*.jsonld)": "jsonld", "N-Quads (*.nq)": "nquads"}.get(selected, "turtle")
             path += kg.EXTENSIONS[fmt]
         try:
-            data = kg.serialize_note(rec, summary, fmt=fmt)
             with open(path, "wb") as f:
-                f.write(data)
+                f.write(kg.serialize_note(rec, summary, fmt=fmt))
         except Exception as exc:
             QMessageBox.warning(self, "Export failed", f"Could not export RDF: {exc}")
             return
         reveal_in_file_manager(path)
+
+    def _email(self) -> None:
+        if self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before emailing it.")
+            return
+        md = self._full_markdown()
+        subject = f"Note: {self._rec.get('title') or 'Note'}"
+        EmailComposeDialog(
+            self._parent, self._parent._default_recipients(), subject, md,
+            self._parent._md_to_html(md), target_id=None,
+        ).exec()
+
+    def _copy(self) -> None:
+        QApplication.clipboard().setText(self._full_markdown())
 
     def _delete(self) -> None:
         if self._remote or self._nid is None:
@@ -5070,16 +5423,18 @@ class NoteEditorDialog(QDialog):
         self.accept()
 
     def reload(self) -> None:
-        """Re-load enrichment after a background pass (without touching the editors)."""
+        """Re-load enrichment after a background pass (without disturbing an active edit)."""
         if self._remote or self._nid is None:
             return
         rec = self._parent.store.get_note(self._nid)
         if not rec:
             return
         self._rec = rec
-        self._refresh_kg_view()
+        if not self._editing:
+            self._render_view()
+            self._update_subtitle()
         if rec.get("summary_json"):
-            self.status.setText("✦ Enriched into the knowledge graph.")
+            self.status.setText("✓ Enriched into the knowledge graph.")
 
 
 class ActivityLogDialog(QDialog):
