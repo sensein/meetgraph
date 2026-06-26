@@ -3,16 +3,18 @@
 # Release flow:  bump `version` in pyproject.toml → commit → tag → push the tag:
 #     git tag v0.2.0 && git push origin v0.2.0
 #
-# ONE-TIME SETUP — PyPI Trusted Publishing (recommended, no stored secrets).
-# On https://pypi.org → your project → Publishing → "Add a pending publisher":
-#     • PyPI Project Name:  meetgraph
-#     • Owner:              e.g., tekrajchhetri
-#     • Repository name:    meetgraph
-#     • Workflow name:      publish.yml          (this file's name — keep in sync)
-#     • Environment name:   pypi                 (matches `environment:` below)
-# The `id-token: write` permission lets the job mint a short-lived OIDC token.
-# (API-token alternative: add a PYPI_API_TOKEN secret and pass it as `password:`
-#  to the publish step, then drop the `id-token`/`environment` lines.)
+# ONE-TIME SETUP — API token (this is what the workflow below uses):
+#   1. https://pypi.org/manage/account/token/  → create a token
+#        (scope it to the `meetgraph` project once the project exists; use an
+#         account-wide token for the very first upload, then narrow it).
+#   2. GitHub repo → Settings → Secrets and variables → Actions → New repository
+#        secret, named exactly:  PYPI_API_TOKEN   (value = the `pypi-…` token).
+#   The publish step reads it as `password: ${{ secrets.PYPI_API_TOKEN }}` below.
+#
+# ALTERNATIVE — Trusted Publishing (OIDC, no stored token): delete the `password:`
+#   line, add `id-token: write` under the job's `permissions:`, keep `environment: pypi`,
+#   and register the publisher on PyPI (project → Publishing → add pending publisher
+#   with this repo + workflow name `publish.yml` + environment `pypi`).
 
 name: Release
 
@@ -37,9 +39,9 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: pypi
+    # (Optional) add `environment: pypi` here to gate releases behind manual
+    # approval — works with a repository secret too.
     permissions:
-      id-token: write   # Required for Trusted Publishing (OIDC)
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -60,3 +62,5 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}   # the API token lives here (repo secret)
