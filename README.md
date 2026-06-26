@@ -242,6 +242,10 @@ Send a meeting's summary + transcript to:
 Use **Email…/Send…** on a meeting, or **⇪ Send…** on the Summary tab for **bulk**
 send across meetings — already-sent items are skipped (de-duplicated).
 
+**Notes** support the same destinations: **Email…/Send…** on a note, or **⇪ Send…**
+on the Notes tab for bulk send/sync (email, REST, MCP, relational + graph DBs).
+Note delivery is de-duplicated independently of meetings, so they never clash.
+
 ---
 
 ## Project layout

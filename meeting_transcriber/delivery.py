@@ -88,6 +88,28 @@ def payload_for(rec: dict) -> dict:
     }
 
 
+def note_payload_for(rec: dict) -> dict:
+    """The JSON payload sent to integrations for one note."""
+    try:
+        summary = json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+    except Exception:
+        summary = {}
+    return {
+        "type": "note",
+        "note_id": rec.get("id"),
+        "title": rec.get("title"),
+        "team_id": rec.get("team_id"),
+        "user": rec.get("user"),
+        "author": rec.get("author_name"),
+        "tags": rec.get("tags"),
+        "about_meeting_id": rec.get("about_meeting_id"),
+        "created_at": rec.get("created_at"),
+        "updated_at": rec.get("updated_at"),
+        "body_markdown": rec.get("body_md"),
+        "summary": summary,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # REST webhook
 # --------------------------------------------------------------------------- #
@@ -164,6 +186,16 @@ def _mcp_arguments(rec: dict) -> dict:
         "team_id": rec.get("team_id"),
         "summary": rec.get("summary_md") or "",
         "transcript": rec.get("transcript_md") or "",
+    }
+
+
+def _mcp_note_arguments(rec: dict) -> dict:
+    return {
+        "title": rec.get("title"),
+        "note_id": rec.get("id"),
+        "team_id": rec.get("team_id"),
+        "tags": rec.get("tags") or "",
+        "body": rec.get("body_md") or "",
     }
 
 

@@ -582,6 +582,11 @@ class MainWindow(QWidget):
         new_btn.setToolTip("Write a new personal or team note")
         new_btn.clicked.connect(self._new_note)
         srow.addWidget(new_btn)
+        send_btn = QPushButton("⇪ Send…")
+        send_btn.setToolTip("Bulk send/sync these notes to email, REST API, MCP, or your "
+                            "external databases — skipping any already sent.")
+        send_btn.clicked.connect(self._bulk_send_notes)
+        srow.addWidget(send_btn)
         refresh = QPushButton("↻ Refresh")
         refresh.clicked.connect(self._refresh_notes)
         srow.addWidget(refresh)
@@ -786,6 +791,23 @@ class MainWindow(QWidget):
     def _new_note(self) -> None:
         NoteEditorDialog(self).exec()
         self._refresh_notes()
+
+    def _open_note_send_dialog(self, note_ids, title: str) -> None:
+        SendDialog(self, note_ids, title, kind="note").exec()
+
+    def _bulk_send_notes(self) -> None:
+        """Bulk send/sync the local notes currently shown in the Notes table."""
+        try:
+            query = self.note_search.text() if hasattr(self, "note_search") else ""
+            notes = (self.store.search_notes(query) if query.strip()
+                     else self.store.list_notes(limit=5000))
+            ids = [n["id"] for n in notes]
+        except Exception:
+            ids = []
+        if not ids:
+            QMessageBox.information(self, "Nothing to send", "No notes to send yet.")
+            return
+        self._open_note_send_dialog(ids, f"Send / sync {len(ids)} note(s)")
 
     def _open_note_detail(self, row: int, _col: int = 0) -> None:
         cell = self.notes_table.item(row, 0)
@@ -1420,9 +1442,10 @@ bundled MCO ontology's <code>Note</code> class.</p>
       toolbar give bold, italic, headings, lists, quotes, code and links; it's saved as Markdown.
       Prefer Markdown? Click <b>⟨⟩ Markdown</b> to type it raw — it renders when you toggle back.</li>
   <li><b>Clean view + export:</b> once saved, a note opens as a clean rendered page (body +
-      its knowledge graph). Export to <b>PDF</b>, <b>Markdown</b>, or <b>RDF</b>, or <b>Email</b>
-      it — the same options as a meeting summary. The Notes <b>Show</b> menu views Personal /
-      All / a team; shared notes from teammates open read-only.</li>
+      its knowledge graph). Export to <b>PDF</b>, <b>Markdown</b>, or <b>RDF</b>, <b>Email</b> it,
+      or <b>Send…</b> it to REST / MCP / your databases — the same options as a meeting summary.
+      Use <b>⇪ Send…</b> on the Notes tab for bulk send/sync. The Notes <b>Show</b> menu views
+      Personal / All / a team; shared notes from teammates open read-only.</li>
 </ul>
 
 <h2>Capturing meeting (system) audio</h2>
@@ -2118,7 +2141,8 @@ are stored locally in a protected config file.</p>
         mtest_row.addWidget(self.mcp_status, 1)
         mform.addRow("", self._wrap(mtest_row))
         mhint = QLabel("MCP needs the 'mcp' Python package (pip install mcp). The tool is called with "
-                       "title, summary, transcript, meeting_id, and team_id.")
+                       "title, summary, transcript, meeting_id, and team_id (for notes: title, body, "
+                       "tags, note_id, team_id). REST and MCP also carry notes when you bulk-send from the Notes tab.")
         mhint.setWordWrap(True)
         mhint.setStyleSheet(_HINT)
         mform.addRow("", mhint)
@@ -3418,6 +3442,73 @@ are stored locally in a protected config file.</p>
             prev = self._gid(self._prev_meeting_id(rec["id"], rec.get("user")))
             grec = self._extern_rec(rec)
             GraphSink(g).push_meeting(grec, summary, [prev] if prev else None, links=grec["links"])
+        else:
+            raise ValueError(f"unknown destination {dest}")
+
+    def _note_full_markdown(self, rec: dict) -> str:
+        """A note rendered as Markdown (title + body + extracted knowledge graph)."""
+        import json as _json
+
+        title = rec.get("title") or "Note"
+        body = rec.get("body_md") or "_Empty note._"
+        md = f"# {title}\n\n{body.strip()}\n"
+        try:
+            s = _json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            s = {}
+        lines: list[str] = []
+        terms, topics = s.get("key_terms") or [], s.get("topics") or []
+        if terms:
+            lines.append("### Key terms")
+            for kt in terms:
+                term = kt.get("term") or ""
+                label = f"[{term}]({kt.get('wikipedia')})" if kt.get("wikipedia") else term
+                gloss = f" — {kt['description']}" if kt.get("description") else ""
+                lines.append(f"- {label}{gloss}")
+            lines.append("")
+        if topics:
+            lines.append("### Topics")
+            lines += [f"- {t.get('topic') or ''}" for t in topics]
+        if lines:
+            md += "\n---\n\n## Knowledge graph\n\n" + "\n".join(lines) + "\n"
+        return md
+
+    def _send_note_to(self, rec: dict, dest: str) -> None:
+        """Send one note record to one destination. Raises on failure."""
+        import json as _json
+
+        if dest == "email":
+            from .email_send import send
+            cfg = self._current_email_cfg()
+            recips = self._default_recipients()
+            if not cfg.host:
+                raise RuntimeError("Email not configured")
+            if not recips:
+                raise RuntimeError("no recipients")
+            md = self._note_full_markdown(rec)
+            send(cfg, recips, f"Note: {rec.get('title') or 'Note'}", md, self._md_to_html(md))
+        elif dest == "rest":
+            from .delivery import RestSink, note_payload_for
+            RestSink(self._current_delivery_cfg().rest).send(note_payload_for(rec))
+        elif dest == "mcp":
+            from .delivery import McpSink, _mcp_note_arguments
+            McpSink(self._current_delivery_cfg().mcp).send(_mcp_note_arguments(rec))
+        elif dest == "relational":
+            if self._team_readonly:
+                raise RuntimeError("team is read-only (key revoked)")
+            from .external import structured_sink
+            structured_sink(self._current_external_cfg().relational).upsert_note(self._extern_note_rec(rec))
+        elif dest == "graph":
+            if self._team_readonly:
+                raise RuntimeError("team is read-only (key revoked)")
+            from .external import GraphSink
+            summary = {}
+            if rec.get("summary_json"):
+                try:
+                    summary = _json.loads(rec["summary_json"])
+                except Exception:
+                    summary = {}
+            GraphSink(self._current_external_cfg().graph).push_note(self._extern_note_rec(rec), summary)
         else:
             raise ValueError(f"unknown destination {dest}")
 
@@ -5083,6 +5174,10 @@ class NoteEditorDialog(QDialog):
         self._btn_email = QPushButton("Email…")
         self._btn_email.clicked.connect(self._email)
         row.addWidget(self._btn_email)
+        self._btn_send = QPushButton("Send…")
+        self._btn_send.setToolTip("Send this note to REST API / MCP / databases (skips already-sent)")
+        self._btn_send.clicked.connect(self._send)
+        row.addWidget(self._btn_send)
         self._btn_copy = QPushButton("Copy")
         self._btn_copy.clicked.connect(self._copy)
         row.addWidget(self._btn_copy)
@@ -5152,6 +5247,7 @@ class NoteEditorDialog(QDialog):
             b.setVisible(not editing and not self._remote)
         for b in (self._btn_pdf, self._btn_md, self._btn_rdf, self._btn_email, self._btn_copy):
             b.setVisible(not editing)
+        self._btn_send.setVisible(not editing and not self._remote)
         self._btn_delete.setVisible(not self._remote)
         self._update_subtitle()
 
@@ -5400,6 +5496,12 @@ class NoteEditorDialog(QDialog):
             self._parent, self._parent._default_recipients(), subject, md,
             self._parent._md_to_html(md), target_id=None,
         ).exec()
+
+    def _send(self) -> None:
+        if self._remote or self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before sending it.")
+            return
+        self._parent._open_note_send_dialog([self._nid], "Send this note")
 
     def _copy(self) -> None:
         QApplication.clipboard().setText(self._full_markdown())
@@ -5797,10 +5899,11 @@ class SendDialog(QDialog):
         ("relational", "Relational database"), ("graph", "Graph database"),
     ]
 
-    def __init__(self, main_window, meeting_ids, title: str = "Send"):
+    def __init__(self, main_window, item_ids, title: str = "Send", kind: str = "meeting"):
         super().__init__(main_window)
         self._win = main_window
-        self._ids = list(meeting_ids)
+        self._ids = list(item_ids)
+        self._kind = kind  # "meeting" | "note"
         self.setWindowTitle(title)
         self.setWindowIcon(app_icon())
         self.resize(440, 360)
@@ -5808,7 +5911,7 @@ class SendDialog(QDialog):
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
         v.setSpacing(8)
-        head = QLabel(f"Send {len(self._ids)} meeting(s) to:")
+        head = QLabel(f"Send {len(self._ids)} {kind}(s) to:")
         head.setObjectName("HeaderTitle")
         v.addWidget(head)
 
@@ -5825,7 +5928,7 @@ class SendDialog(QDialog):
             self.checks[key] = cb
             v.addWidget(cb)
 
-        self.skip_check = QCheckBox("Skip meetings already sent to that destination")
+        self.skip_check = QCheckBox(f"Skip {kind}s already sent to that destination")
         self.skip_check.setChecked(True)
         v.addWidget(self.skip_check)
 
@@ -5852,7 +5955,12 @@ class SendDialog(QDialog):
             self.status.setText("⚠ Pick at least one destination.")
             return
         skip = self.skip_check.isChecked()
-        ids, win = self._ids, self._win
+        ids, win, kind = self._ids, self._win, self._kind
+        is_note = kind == "note"
+        # Namespace note delivery state so note ids never collide with meeting ids.
+        ddest = (lambda d: f"note:{d}") if is_note else (lambda d: d)
+        getter = win.store.get_note if is_note else win.store.get_meeting
+        sender = win._send_note_to if is_note else win._send_meeting_to
         self.status.setText("Sending…")
         self.send_btn.setEnabled(False)
 
@@ -5860,23 +5968,24 @@ class SendDialog(QDialog):
             sent = skipped = 0
             errs: list[str] = []
             for mid in ids:
-                rec = win.store.get_meeting(mid)
+                rec = getter(mid)
                 if not rec:
                     continue
                 for dest in dests:
-                    if skip and win.store.is_sent(mid, dest):
+                    if skip and win.store.is_sent(mid, ddest(dest)):
                         skipped += 1
                         continue
                     try:
-                        win._send_meeting_to(rec, dest)
-                        win.store.mark_sent(mid, dest)
+                        sender(rec, dest)
+                        win.store.mark_sent(mid, ddest(dest))
                         sent += 1
                     except Exception as exc:
                         errs.append(f"#{mid} {dest}: {exc}")
             try:
                 from . import external
                 entry = win.store.log_action(
-                    "bulk_send", win._display_name, win.user_email, win.team_id or None, None,
+                    "bulk_send_notes" if is_note else "bulk_send",
+                    win._display_name, win.user_email, win.team_id or None, None,
                     f"{sent} sent, {skipped} skipped, {len(errs)} errors; dests={','.join(dests)}")
                 xcfg = win._current_external_cfg()
                 if xcfg.relational.enabled and xcfg.relational.url:
