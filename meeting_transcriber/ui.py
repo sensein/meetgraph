@@ -248,9 +248,10 @@ class MainWindow(QWidget):
             import secrets
             self._node_id = secrets.token_hex(8)
             self.store.set_setting("node.id", self._node_id)
-        # Read-only for the active team when its key has been revoked: the content
-        # stays accessible (view + feed), but no new writes go to its shared DB.
+        # When the active team's key is revoked we drop to personal mode; the
+        # team stays viewable read-only via the Summary 'Show' menu.
         self._team_readonly = False
+        self._revoked_team_name = ""
         self.meeting_name = meeting_name.strip()
         self._started_at = None
         self._meeting_id = None
@@ -461,8 +462,9 @@ class MainWindow(QWidget):
         srow.addWidget(graph_btn)
         v.addLayout(srow)
 
-        self.meetings_table = QTableWidget(0, 5)
-        self.meetings_table.setHorizontalHeaderLabels(["Meeting", "Date", "Participant", "Summary", "Status"])
+        self.meetings_table = QTableWidget(0, 6)
+        self.meetings_table.setHorizontalHeaderLabels(
+            ["Meeting", "Team", "Date", "Participant", "Summary", "Status"])
         self.meetings_table.verticalHeader().setVisible(False)
         self.meetings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.meetings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -471,10 +473,8 @@ class MainWindow(QWidget):
         self.meetings_table.setCursor(Qt.CursorShape.PointingHandCursor)
         hh = self.meetings_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        for c in (1, 2, 3, 4, 5):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self.meetings_table.setStyleSheet(
             "QTableWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;gridline-color:#eef1f6;}"
             "QHeaderView::section{background:#f1f5f9;border:none;padding:8px;font-weight:700;color:#475569;}"
@@ -509,12 +509,14 @@ class MainWindow(QWidget):
         prev = self.scope_combo.currentData()
         self.scope_combo.blockSignals(True)
         self.scope_combo.clear()
-        self.scope_combo.addItem("Personal (this device)", ("personal", None))
         try:
             memberships = self.store.list_memberships()
             revoked = {k.get("key_id") for k in self.store.list_team_keys() if k.get("revoked")}
         except Exception:
             memberships, revoked = [], set()
+        if memberships:
+            self.scope_combo.addItem("All (personal + teams)", ("all", None))
+        self.scope_combo.addItem("Personal (this device)", ("personal", None))
         for m in memberships:
             name = m.get("team_name") or m.get("team_id")
             ro = m.get("key_id") in revoked or (m.get("team_id") == self.team_id and self._team_readonly)
@@ -527,32 +529,79 @@ class MainWindow(QWidget):
         self.scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.scope_combo.blockSignals(False)
 
+    def _team_name(self, team_id) -> str:
+        if not team_id:
+            return "Personal"
+        try:
+            for m in self.store.list_memberships():
+                if m.get("team_id") == team_id:
+                    return m.get("team_name") or team_id
+        except Exception:
+            pass
+        return team_id
+
+    def _collect_rows(self, kind: str, feed_team_id, query: str):
+        """Gather meeting rows for the chosen scope.
+
+        Each row carries 'source' (('local', None) or ('team', team_id)) and a
+        'team_label' for the Team column. Remote rows whose id matches a synced
+        local meeting are dropped so nothing shows twice."""
+        notes: list[str] = []
+        # Local meetings (this device), always available.
+        try:
+            local = self.store.search_meetings(query)
+        except Exception as exc:
+            return None, f"⚠ {exc}"
+        local_rows = [{"id": m.id, "title": m.title, "user": m.user,
+                       "started_at": m.started_at, "created_at": m.created_at,
+                       "summary_md": m.summary_md, "team_id": m.team_id,
+                       "source": ("local", None), "team_label": self._team_name(m.team_id)}
+                      for m in local]
+        local_gids = {self._gid(r["id"]) for r in local_rows}
+
+        def team_rows(tid):
+            rows, note = self._fetch_team_meetings(query, tid)
+            if rows is None:
+                if note:
+                    notes.append(f"{self._team_name(tid)} — {note.lstrip('⚠ ')}")
+                return []
+            out = []
+            for r in rows:
+                if r.get("id") in local_gids:
+                    continue  # already shown as the local copy
+                r = dict(r)
+                r["source"] = ("team", tid)
+                r["team_label"] = self._team_name(tid)
+                out.append(r)
+            return out
+
+        if kind == "personal":
+            rows = local_rows
+        elif kind == "team":
+            rows = [r for r in local_rows if r.get("team_id") == feed_team_id] + team_rows(feed_team_id)
+        else:  # "all" — personal + every joined team
+            rows = list(local_rows)
+            try:
+                for m in self.store.list_memberships():
+                    rows += team_rows(m.get("team_id"))
+            except Exception:
+                pass
+        return rows, (" · ".join(notes) if notes else None)
+
     def _refresh_meetings(self) -> None:
         if not hasattr(self, "meetings_table"):
             return
         query = (self.search_edit.text() if hasattr(self, "search_edit") else "").strip().lower()
         scope = self.scope_combo.currentData() if hasattr(self, "scope_combo") else ("personal", None)
         kind, feed_team_id = scope if scope else ("personal", None)
-        team_mode = kind == "team"
-        self._team_feed = team_mode
-        self._feed_team_id = feed_team_id if team_mode else None
+        self._team_feed = kind in ("team", "all")
+        self._feed_team_id = feed_team_id if kind == "team" else None
 
-        if team_mode:
-            rows, note = self._fetch_team_meetings(query, feed_team_id)
-            if rows is None:  # not available
-                self.meetings_table.setRowCount(0)
-                self.meetings_count.setText(note)
-                return
-        else:
-            try:
-                meetings = self.store.search_meetings(query)
-            except Exception as exc:
-                self.meetings_count.setText(f"⚠ {exc}")
-                return
-            rows = [{"id": m.id, "title": m.title, "user": m.user,
-                     "started_at": m.started_at, "created_at": m.created_at,
-                     "summary_md": m.summary_md} for m in meetings]
-            note = None
+        rows, note = self._collect_rows(kind, feed_team_id, query)
+        if rows is None:
+            self.meetings_table.setRowCount(0)
+            self.meetings_count.setText(note)
+            return
 
         self.meetings_table.setSortingEnabled(False)
         self.meetings_table.setRowCount(0)
@@ -560,25 +609,25 @@ class MainWindow(QWidget):
             r = self.meetings_table.rowCount()
             self.meetings_table.insertRow(r)
             when = (m.get("started_at") or m.get("created_at") or "")[:16].replace("T", " ")
+            source = m.get("source") or ("local", None)
             title_item = QTableWidgetItem(m.get("title") or "Meeting")
             title_item.setData(Qt.ItemDataRole.UserRole, m.get("id"))
+            title_item.setData(Qt.ItemDataRole.UserRole + 1, source)
             self.meetings_table.setItem(r, 0, title_item)
-            self.meetings_table.setItem(r, 1, QTableWidgetItem(when))
-            self.meetings_table.setItem(r, 2, QTableWidgetItem(m.get("user") or ""))
-            self.meetings_table.setItem(r, 3, QTableWidgetItem("✦ yes" if m.get("summary_md") else "—"))
-            status = "" if team_mode else self._meeting_status(m.get("id"))
-            self.meetings_table.setItem(r, 4, QTableWidgetItem(status))
+            self.meetings_table.setItem(r, 1, QTableWidgetItem(m.get("team_label") or "Personal"))
+            self.meetings_table.setItem(r, 2, QTableWidgetItem(when))
+            self.meetings_table.setItem(r, 3, QTableWidgetItem(m.get("user") or ""))
+            self.meetings_table.setItem(r, 4, QTableWidgetItem("✦ yes" if m.get("summary_md") else "—"))
+            status = self._meeting_status(m.get("id")) if source[0] == "local" else ""
+            self.meetings_table.setItem(r, 5, QTableWidgetItem(status))
         self.meetings_table.setSortingEnabled(True)
-        self.meetings_table.sortItems(1, Qt.SortOrder.DescendingOrder)  # latest meeting on top
-        if team_mode:
-            tname = next((m.get("team_name") for m in self.store.list_memberships()
-                          if m.get("team_id") == feed_team_id), feed_team_id)
-            scope_label = f"team “{tname}” (shared DB)"
-        else:
-            scope_label = "personal"
+        self.meetings_table.sortItems(2, Qt.SortOrder.DescendingOrder)  # latest meeting on top
+        scope_label = {"personal": "personal", "all": "personal + team"}.get(
+            kind, f"team “{self._team_name(feed_team_id)}”")
+        prefix = (note + " · ") if note else ""
         self.meetings_count.setText(
-            note or (f"{len(rows)} {scope_label} meeting(s)"
-                     + (f" matching “{query}”" if query else "") + " · click a row to open"))
+            prefix + f"{len(rows)} {scope_label} meeting(s)"
+            + (f" matching “{query}”" if query else "") + " · click a row to open")
 
     def _meeting_status(self, meeting_id) -> str:
         """Per-meeting enrichment status for the Summary table."""
@@ -653,14 +702,17 @@ class MainWindow(QWidget):
         mid = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         if mid is None:
             return
-        if getattr(self, "_team_feed", False):
-            ext = getattr(self, "_feed_cfg", None) or self._current_external_cfg()
+        source = (cell.data(Qt.ItemDataRole.UserRole + 1) or ("local", None))
+        if source[0] == "team":
+            ext = self._feed_external_cfg(source[1])
             try:
                 from .external import GraphSink, structured_sink
-                if getattr(self, "_team_feed_source", "relational") == "graph":
+                if ext.relational.enabled and ext.relational.url:
+                    rec = structured_sink(ext.relational).get_meeting(mid)
+                elif ext.graph.enabled and ext.graph.query_url:
                     rec = GraphSink(ext.graph).get_meeting(mid)
                 else:
-                    rec = structured_sink(ext.relational).get_meeting(mid)
+                    rec = None
             except Exception as exc:
                 QMessageBox.warning(self, "Shared DB", f"Could not load meeting: {exc}")
                 return
@@ -1496,14 +1548,16 @@ are stored locally in a protected config file.</p>
             n_teams = len(self.store.list_memberships())
         except Exception:
             n_teams = 1 if in_team else 0
-        if in_team and self._team_readonly:
-            self.team_status.setText(
-                f"🔒 In team “{self.team_name or self.team_id}” (read-only) — this key was revoked. "
-                "You can still view the team's meetings; new ones won't sync to its shared database.")
-        elif in_team:
+        revoked_note = getattr(self, "_revoked_team_name", "")
+        if in_team:
             extra = f"  ·  {n_teams} team(s) joined — use “Teams…” to switch." if n_teams > 1 else ""
             self.team_status.setText(
                 f"✓ In team “{self.team_name or self.team_id}” — meetings sync to the shared database." + extra)
+        elif revoked_note:
+            self.team_status.setText(
+                f"Your key for “{revoked_note}” was revoked — back to personal mode. You can still "
+                "view that team's meetings (read-only) from the Summary “Show” menu.")
+            self._revoked_team_name = ""  # show this note once
         else:
             self.team_status.setText("Not in a team. Generate a key to start one, or paste a key to join.")
         # Leave only makes sense when you're actually in a team.
@@ -2439,28 +2493,52 @@ are stored locally in a protected config file.</p>
         self._update_team_status()
         self._refresh_meetings()
 
-    def _refresh_team_readonly(self) -> None:
-        """A team goes read-only when the key this user joined with is revoked.
-        Checked locally first, then against the shared DB (best-effort)."""
-        ro = False
-        m = self.store.get_membership(self.team_id) if self.team_id else None
+    def _active_key_revoked(self) -> bool:
+        """Whether the key the user is currently active under has been revoked
+        (checked locally first, then against the shared DB best-effort)."""
+        if not self.team_id:
+            return False
+        m = self.store.get_membership(self.team_id)
         kid = (m or {}).get("key_id")
-        if self.team_id and kid:
+        if not kid:
+            return False
+        try:
+            if any(k.get("key_id") == kid and k.get("revoked")
+                   for k in self.store.list_team_keys()):
+                return True
+        except Exception:
+            pass
+        rel = self._current_external_cfg().relational
+        if rel.enabled and rel.url:
             try:
-                if any(k.get("key_id") == kid and k.get("revoked")
-                       for k in self.store.list_team_keys()):
-                    ro = True
+                from .external import structured_sink
+                return kid in structured_sink(rel).revoked_key_ids()
             except Exception:
-                pass
-            if not ro:
-                rel = self._current_external_cfg().relational
-                if rel.enabled and rel.url:
-                    try:
-                        from .external import structured_sink
-                        ro = kid in structured_sink(rel).revoked_key_ids()
-                    except Exception:
-                        ro = False
-        self._team_readonly = ro
+                return False
+        return False
+
+    def _refresh_team_readonly(self) -> None:
+        """If the active team's join key has been revoked, drop to non-team mode.
+
+        The membership (and its key) is kept, so the team's meetings can still be
+        viewed read-only from the Summary 'Show' menu - you're simply no longer
+        actively in the team and won't write to its shared database."""
+        self._team_readonly = False
+        if self.team_id and self._active_key_revoked():
+            name = self.team_name or self.team_id
+            self._audit("team_key_revoked", None, name)
+            self.team_id, self.team_name = "", ""
+            self.store.set_setting("team.id", "")
+            self.store.set_setting("team.name", "")
+            # Detach the revoked team's shared DB -> back to local/personal mode.
+            prev, self._loading = self._loading, True
+            try:
+                self.ext_rel_enable.setChecked(False)
+                self.ext_graph_enable.setChecked(False)
+            finally:
+                self._loading = prev
+            self._persist_external()
+            self._revoked_team_name = name  # surfaced once in the team status
 
     def _leave_team(self) -> None:
         if not self.team_id:
@@ -4162,10 +4240,18 @@ class TeamsDialog(QDialog):
         if not m:
             self.status.setText("Select a team first.")
             return
+        name = m.get("team_name") or m["team_id"]
+        if m.get("key_id") in self._revoked_ids():
+            self.status.setText(f"“{name}” key is revoked — view it read-only from the Summary "
+                                "“Show” menu (can't be the active team).")
+            return
         self._win._switch_team(m["team_id"])
         self._reload()
-        self.status.setText(f"Switched to “{m.get('team_name') or m['team_id']}”."
-                            + (" (read-only)" if self._win._team_readonly else ""))
+        if self._win.team_id == m["team_id"]:
+            self.status.setText(f"Switched to “{name}”.")
+        else:
+            self.status.setText(f"“{name}” key was revoked — staying in personal mode; "
+                                "view it read-only from the Summary “Show” menu.")
 
     def _leave(self) -> None:
         m = self._selected()
