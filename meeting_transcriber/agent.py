@@ -305,6 +305,59 @@ def clean_transcript_file(path: str) -> str:
     return mod.render(cues)
 
 
+# --------------------------------------------------------------------------- #
+# Notes - the same knowledge-graph surface for a directly-authored note
+# --------------------------------------------------------------------------- #
+class NoteEnrichment(BaseModel):
+    """Structured knowledge extracted from a free-text note.
+
+    The shape is a subset of ``MeetingSummary`` (topics + key_terms, plus the
+    PubMed fields filled later by :func:`link_literature`) so the same kg /
+    external-sync code can consume a note's ``summary_json`` unchanged.
+    """
+    topics: list[Topic] = Field(
+        default_factory=list,
+        description="The themes the note covers, each with a few short paraphrased points.")
+    key_terms: list[KeyTerm] = Field(
+        default_factory=list,
+        description="Salient terms worth looking up — named entities, technologies, methods, organisations.")
+    publications: list[Publication] = Field(default_factory=list)
+    research_gaps: list[str] = Field(default_factory=list)
+
+
+NOTE_SYSTEM_PROMPT = """\
+You extract a small knowledge-graph surface from a personal or team note the user wrote.
+Be faithful: use only what the note actually says; never invent facts, owners, or dates.
+
+1. Identify the salient key terms the note mentions and that a reader might want to look up: \
+named entities, technologies, tools, methods, standards, organisations, domain concepts. Use the \
+canonical name (e.g. "Kubernetes", not "k8s"). Skip generic words. Leave the wikipedia/wikidata \
+fields null — they are filled automatically; never invent a URL.
+2. Organise the content into a few topics, each with short, paraphrased factual points (not quotes). \
+A very short note may have a single topic, or none.
+3. Do not summarise the author or add commentary — just extract terms and topics that are present."""
+
+
+class NoteEnrichmentAgent:
+    """Runs key-term + topic extraction over a note body via any configured provider."""
+
+    def __init__(self, provider="anthropic", model_name=None, api_key=None, base_url=None):
+        self.provider = provider or "anthropic"
+        self.model_name = model_name or PROVIDERS.get(self.provider, ("",))[0]
+        model = _build_model(self.provider, self.model_name, api_key, base_url)
+        output_type = (PromptedOutput(NoteEnrichment)
+                       if self.provider in ("opensource", "openrouter") else NoteEnrichment)
+        self._agent = Agent(model, output_type=output_type, system_prompt=NOTE_SYSTEM_PROMPT, retries=3)
+
+    def enrich(self, body_text: str, title: str | None = None) -> NoteEnrichment:
+        if not (body_text or "").strip():
+            return NoteEnrichment()
+        header = f"Note title: {title}\n\n" if title else ""
+        prompt = (f"{header}Extract the key terms and topics from the following note.\n\n"
+                  f"Note:\n\n{body_text}")
+        return self._agent.run_sync(prompt).output
+
+
 def link_key_terms(summary: MeetingSummary) -> MeetingSummary:
     """Resolve each key term to a verified Wikipedia article + Wikidata entity.
 

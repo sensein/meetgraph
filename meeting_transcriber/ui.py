@@ -194,11 +194,30 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked { background: #2563eb; border-color: #2563eb; }
 QCheckBox::indicator:hover { border-color: #2563eb; }
 
-QTextEdit#transcript {
+QTextEdit#transcript, QTextBrowser#transcript {
     background: #ffffff;
     border: 1px solid #e2e8f0;
     border-radius: 12px;
     padding: 12px;
+}
+QTextEdit#transcript:focus { border: 1px solid #2563eb; }
+
+/* White rounded grouping card (used to group form fields in dialogs) */
+#Card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+}
+#CardLabel { color: #475569; font-weight: 600; }
+#SectionLabel {
+    color: #64748b; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.4px; text-transform: uppercase;
+}
+#KGCard {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 6px;
 }
 
 #statusBar {
@@ -264,7 +283,9 @@ class MainWindow(QWidget):
         self._running_summary = None  # incremental live summary (merged across ticks)
         self._summarized_chars = 0    # transcript length already summarized
         self._processing: set = set()  # (meeting_id, stage) currently being enriched
+        self._note_processing: set = set()  # note_ids currently being enriched
         self._open_details: dict = {}  # meeting_id -> open MeetingDetailDialog (for live refresh)
+        self._open_notes: dict = {}    # note_id -> open NoteEditorDialog (for live refresh)
         self._loading = True  # suppress config saves while widgets are built/loaded
 
         self._build_ui()
@@ -285,6 +306,7 @@ class MainWindow(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_record_tab(), "  ◉  Meeting  ")
+        self.tabs.addTab(self._build_notes_tab(), "  📝  Notes  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
         self.tabs.addTab(self._build_help_tab(), "  ❓  Help  ")
@@ -509,10 +531,423 @@ class MainWindow(QWidget):
         self._refresh_meetings()
         return page
 
+    # ----- notes (Notes tab) -----
+    def _build_notes_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("RecordPage")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(2, 10, 2, 2)
+        v.setSpacing(10)
+
+        intro = QLabel(
+            "Personal & team notes — written directly (no meeting needed) and enriched into the "
+            "same knowledge graph as meetings: key terms are linked to Wikipedia/Wikidata. Share a "
+            "personal note to a team to sync it into the team's shared database.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#64748b; font-size:12px;")
+        v.addWidget(intro)
+
+        srow = QHBoxLayout(); srow.setSpacing(8)
+        self.note_search = QLineEdit()
+        self.note_search.setPlaceholderText("🔎  Search notes — title, body, or tags…")
+        self.note_search.setClearButtonEnabled(True)
+        self.note_search.textChanged.connect(self._refresh_notes)
+        srow.addWidget(self.note_search, 1)
+        srow.addWidget(QLabel("Show:"))
+        self.note_scope_combo = QComboBox()
+        self.note_scope_combo.setToolTip("View your personal notes (this device) or the shared "
+                                         "notes of any team you've joined.")
+        self.note_scope_combo.currentIndexChanged.connect(self._refresh_notes)
+        self._populate_note_scope_combo()
+        srow.addWidget(self.note_scope_combo)
+        new_btn = QPushButton("＋ New note")
+        new_btn.setObjectName("primary")
+        new_btn.setToolTip("Write a new personal or team note")
+        new_btn.clicked.connect(self._new_note)
+        srow.addWidget(new_btn)
+        refresh = QPushButton("↻ Refresh")
+        refresh.clicked.connect(self._refresh_notes)
+        srow.addWidget(refresh)
+        v.addLayout(srow)
+
+        self.notes_table = QTableWidget(0, 6)
+        self.notes_table.setHorizontalHeaderLabels(
+            ["Note", "Scope", "Updated", "Author", "Tags", "Status"])
+        status_hdr = self.notes_table.horizontalHeaderItem(5)
+        if status_hdr is not None:
+            status_hdr.setToolTip(
+                "Knowledge-graph status:\n"
+                "✓ Enriched — key terms/topics extracted and linked to Wikipedia/Wikidata\n"
+                "⏳ Enriching… — extraction in progress\n"
+                "Not enriched — saved, but the AI pass hasn't run (e.g. no API key)")
+        self.notes_table.verticalHeader().setVisible(False)
+        self.notes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.notes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.notes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.notes_table.setSortingEnabled(True)
+        self.notes_table.setCursor(Qt.CursorShape.PointingHandCursor)
+        hh = self.notes_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3, 4, 5):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.notes_table.setStyleSheet(
+            "QTableWidget{background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;gridline-color:#eef1f6;}"
+            "QHeaderView::section{background:#f1f5f9;border:none;padding:8px;font-weight:700;color:#475569;}"
+            "QTableWidget::item{padding:8px 6px;}"
+            "QTableWidget::item:selected{background:#2563eb;color:#ffffff;}"
+        )
+        self.notes_table.cellClicked.connect(self._open_note_detail)
+        v.addWidget(self.notes_table, 1)
+
+        self.notes_count = QLabel("Click a note to open it, or ＋ New note to start one.")
+        self.notes_count.setStyleSheet("color:#64748b; font-size:12px;")
+        v.addWidget(self.notes_count)
+        self._refresh_notes()
+        return page
+
+    def _populate_note_scope_combo(self) -> None:
+        if not hasattr(self, "note_scope_combo"):
+            return
+        prev = self.note_scope_combo.currentData()
+        self.note_scope_combo.blockSignals(True)
+        self.note_scope_combo.clear()
+        try:
+            memberships = self.store.list_memberships()
+            revoked = {k.get("key_id") for k in self.store.list_team_keys() if k.get("revoked")}
+        except Exception:
+            memberships, revoked = [], set()
+        if memberships:
+            self.note_scope_combo.addItem("All (personal + teams)", ("all", None))
+        self.note_scope_combo.addItem("Personal (this device)", ("personal", None))
+        for m in memberships:
+            name = m.get("team_name") or m.get("team_id")
+            state = m.get("state") or "active"
+            until = (m.get("access_until") or "")[:10]
+            if state == "left":
+                suffix = f"  (left — read-only{(' to ' + until) if until else ''})"
+            elif state == "revoked" or m.get("key_id") in revoked:
+                suffix = f"  (revoked — read-only{(' to ' + until) if until else ''})"
+            else:
+                suffix = ""
+            self.note_scope_combo.addItem(f"Team · {name}{suffix}", ("team", m.get("team_id")))
+        idx = self.note_scope_combo.findData(prev) if prev else -1
+        if idx < 0 and self.team_id:
+            idx = self.note_scope_combo.findData(("team", self.team_id))
+        self.note_scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.note_scope_combo.blockSignals(False)
+
+    def _collect_note_rows(self, kind: str, feed_team_id, query: str):
+        """Gather note rows for the chosen scope (mirrors _collect_rows for meetings)."""
+        notes_msg: list[str] = []
+        try:
+            local = self.store.search_notes(query)
+        except Exception as exc:
+            return None, f"⚠ {exc}"
+        local_rows = [{**n, "source": ("local", None),
+                       "scope_label": self._team_name(n.get("team_id"))} for n in local]
+        local_gids = {self._gid(r["id"]) for r in local_rows}
+        cutoffs = {}
+        try:
+            cutoffs = {m["team_id"]: m.get("access_until") for m in self.store.list_memberships()}
+        except Exception:
+            pass
+
+        def within_cutoff(r, tid):
+            cut = cutoffs.get(tid)
+            if not cut:
+                return True
+            when = r.get("updated_at") or r.get("created_at") or ""
+            return when <= cut
+
+        def team_rows(tid):
+            rows, note = self._fetch_team_notes(query, tid)
+            if rows is None:
+                if note:
+                    notes_msg.append(f"{self._team_name(tid)} — {note.lstrip('⚠ ')}")
+                return []
+            out = []
+            for r in rows:
+                if r.get("id") in local_gids:
+                    continue
+                if not within_cutoff(r, tid):
+                    continue
+                r = dict(r)
+                r["source"] = ("team", tid)
+                r["scope_label"] = self._team_name(tid)
+                out.append(r)
+            return out
+
+        if kind == "personal":
+            rows = local_rows
+        elif kind == "team":
+            rows = [r for r in local_rows
+                    if r.get("team_id") == feed_team_id and within_cutoff(r, feed_team_id)] \
+                + team_rows(feed_team_id)
+        else:  # "all"
+            rows = list(local_rows)
+            try:
+                for m in self.store.list_memberships():
+                    rows += team_rows(m.get("team_id"))
+            except Exception:
+                pass
+        return rows, (" · ".join(notes_msg) if notes_msg else None)
+
+    def _fetch_team_notes(self, query: str, team_id=None):
+        """Return (rows, note). rows=None means the shared DB isn't available."""
+        team_id = team_id if team_id is not None else self.team_id
+        ext = self._feed_external_cfg(team_id)
+        rel = ext.relational
+        from .external import GraphSink, structured_sink
+        if rel.enabled and rel.url:
+            try:
+                rows = structured_sink(rel).list_notes(team_id=team_id or None)
+            except Exception as exc:
+                return None, f"⚠ Shared DB: {exc}"
+        elif ext.graph.enabled and ext.graph.query_url:
+            try:
+                rows = GraphSink(ext.graph).list_notes(team_id=team_id or None)
+            except Exception as exc:
+                return None, f"⚠ Shared graph DB: {exc}"
+        else:
+            return None, ("Enable a relational or graph shared database (with a query endpoint) "
+                          "in Configuration to see team notes.")
+        if query:
+            rows = [r for r in rows if query in (r.get("title") or "").lower()
+                    or query in (r.get("tags") or "").lower()]
+        return rows, None
+
+    def _refresh_notes(self) -> None:
+        if not hasattr(self, "notes_table"):
+            return
+        query = (self.note_search.text() if hasattr(self, "note_search") else "").strip().lower()
+        scope = self.note_scope_combo.currentData() if hasattr(self, "note_scope_combo") else ("personal", None)
+        kind, feed_team_id = scope if scope else ("personal", None)
+        rows, note = self._collect_note_rows(kind, feed_team_id, query)
+        if rows is None:
+            self.notes_table.setRowCount(0)
+            self.notes_count.setText(note)
+            return
+        self.notes_table.setSortingEnabled(False)
+        self.notes_table.setRowCount(0)
+        for n in rows:
+            r = self.notes_table.rowCount()
+            self.notes_table.insertRow(r)
+            when = (n.get("updated_at") or n.get("created_at") or "")[:16].replace("T", " ")
+            source = n.get("source") or ("local", None)
+            title_item = QTableWidgetItem(n.get("title") or "Note")
+            title_item.setData(Qt.ItemDataRole.UserRole, n.get("id"))
+            title_item.setData(Qt.ItemDataRole.UserRole + 1, source)
+            self.notes_table.setItem(r, 0, title_item)
+            self.notes_table.setItem(r, 1, QTableWidgetItem(n.get("scope_label") or "Personal"))
+            self.notes_table.setItem(r, 2, QTableWidgetItem(when))
+            self.notes_table.setItem(r, 3, QTableWidgetItem(n.get("author_name") or n.get("user") or ""))
+            self.notes_table.setItem(r, 4, QTableWidgetItem(n.get("tags") or ""))
+            status = self._note_status(n.get("id")) if source[0] == "local" else ""
+            self.notes_table.setItem(r, 5, QTableWidgetItem(status))
+        self.notes_table.setSortingEnabled(True)
+        self.notes_table.sortItems(2, Qt.SortOrder.DescendingOrder)
+        scope_label = {"personal": "personal", "all": "personal + team"}.get(
+            kind, f"team “{self._team_name(feed_team_id)}”")
+        prefix = (note + " · ") if note else ""
+        self.notes_count.setText(
+            prefix + f"{len(rows)} {scope_label} note(s)"
+            + (f" matching “{query}”" if query else "") + " · click a row to open")
+
+    def _note_status(self, note_id) -> str:
+        if note_id is None:
+            return ""
+        if note_id in self._note_processing:
+            return "⏳ Enriching…"
+        try:
+            jobs = self.store.note_jobs_for(note_id)
+        except Exception:
+            return ""
+        if any(v == "pending" for v in jobs.values()):
+            return "⏳ Enriching…"
+        return "✓ Enriched" if jobs.get("enrich") == "done" else "Not enriched"
+
+    def _new_note(self) -> None:
+        NoteEditorDialog(self).exec()
+        self._refresh_notes()
+
+    def _open_note_detail(self, row: int, _col: int = 0) -> None:
+        cell = self.notes_table.item(row, 0)
+        nid = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        if nid is None:
+            return
+        source = cell.data(Qt.ItemDataRole.UserRole + 1) or ("local", None)
+        if source[0] == "team":
+            ext = self._feed_external_cfg(source[1])
+            try:
+                from .external import GraphSink, structured_sink
+                if ext.relational.enabled and ext.relational.url:
+                    rec = structured_sink(ext.relational).get_note(nid)
+                elif ext.graph.enabled and ext.graph.query_url:
+                    rec = GraphSink(ext.graph).get_note(nid)
+                else:
+                    rec = None
+            except Exception as exc:
+                QMessageBox.warning(self, "Shared note", f"Could not load the shared note: {exc}")
+                return
+            if not rec:
+                QMessageBox.information(self, "Not found", "That note isn't available in the shared database.")
+                return
+            NoteEditorDialog(self, rec, remote=True).exec()
+            return
+        rec = self.store.get_note(nid)
+        if rec:
+            dlg = NoteEditorDialog(self, rec)
+            self._open_notes[nid] = dlg
+            dlg.exec()
+            self._open_notes.pop(nid, None)
+            self._refresh_notes()
+
+    def _refresh_open_note(self, note_id) -> None:
+        dlg = self._open_notes.get(note_id)
+        if dlg is not None:
+            try:
+                dlg.reload()
+            except Exception:
+                pass
+
+    def _extern_note_rec(self, rec: dict) -> dict:
+        """Copy of a note record with id (and about_meeting_id) mapped to global ids."""
+        rec = dict(rec)
+        if rec.get("id") is not None:
+            rec["id"] = self._gid(rec["id"])
+        if rec.get("about_meeting_id"):
+            rec["about_meeting_id"] = self._gid(rec["about_meeting_id"])
+        return rec
+
+    def _push_note_external_async(self, note_id) -> None:
+        if note_id is None or self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+
+        def work():
+            rec = self.store.get_note(note_id)
+            if not rec:
+                return "no record"
+            res = external.push_note(self._extern_note_rec(rec), cfg)
+            bad = [f"{k}: {v}" for k, v in res.items() if v != "ok"]
+            return "Note sync failed — " + "; ".join(bad) if bad else "ok"
+
+        self._run_async(work, lambda msg, ok: (None if msg in ("ok", "OK")
+                                               else self.status_label.setText(f"⚠ {msg}")))
+
+    def _delete_note_remote_async(self, note_id) -> None:
+        if note_id is None or self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        if self._sync_policy() != "mirror":
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+        gid = self._gid(note_id)
+        self._run_async(lambda: (external.delete_note_remote(gid, cfg) and "") or "",
+                        lambda m, ok: None)
+
+    def _enrich_note_async(self, note_id, on_finish=None) -> None:
+        """Extract key terms + topics from the note body, link them, and sync the note."""
+        if note_id is None:
+            if on_finish:
+                on_finish()
+            return
+        provider_cfg = {
+            "provider": self.ai_provider.currentData(),
+            "model": self.ai_model.currentText().strip(),
+            "api_key": self.ai_key.text().strip(),
+            "base_url": self.ai_base.text().strip(),
+        }
+        pubmed_on = self.pubmed_enable.isChecked()
+        pubmed_key = self.pubmed_token.text().strip()
+        try:
+            max_results = int(self.pubmed_max.text().strip() or "8")
+        except ValueError:
+            max_results = 8
+        name, email, team_id = self._display_name, self.user_email, self.team_id or None
+        try:
+            self.store.mark_note_job(note_id, "enrich", "pending")
+        except Exception:
+            pass
+        self._note_processing.add(note_id)
+        self._refresh_notes()
+
+        def work():
+            from .agent import NoteEnrichmentAgent, link_key_terms, link_literature
+
+            rec = self.store.get_note(note_id)
+            if not rec:
+                return ""
+            body = rec.get("body_md") or ""
+            if body.strip():
+                try:
+                    agent = NoteEnrichmentAgent(
+                        provider=provider_cfg["provider"], model_name=provider_cfg["model"] or None,
+                        api_key=provider_cfg["api_key"] or None, base_url=provider_cfg["base_url"] or None)
+                    enr = agent.enrich(body, rec.get("title"))
+                    link_key_terms(enr)
+                    if pubmed_on:
+                        link_literature(enr, api_key=pubmed_key or None,
+                                        max_results=max_results, provider_cfg=provider_cfg)
+                    self.store.set_note_enrichment(note_id, enr.model_dump_json(indent=2))
+                except Exception as exc:
+                    # Keep the note; just report that enrichment couldn't run (e.g. no API key).
+                    self._push_note_now(note_id)
+                    return f"Note saved — enrichment skipped ({type(exc).__name__})."
+            self._push_note_now(note_id)
+            try:
+                entry = self.store.log_action("note_enriched", name, email, team_id, note_id)
+                cfg = self._current_external_cfg()
+                if cfg.relational.enabled and cfg.relational.url:
+                    from . import external
+                    external.push_audit(entry, cfg)
+            except Exception:
+                pass
+            return "ok"
+
+        def done(msg, ok):
+            try:
+                self.store.mark_note_job(note_id, "enrich", "done")
+            except Exception:
+                pass
+            self._note_processing.discard(note_id)
+            if msg and msg not in ("ok", "OK"):
+                self.status_label.setText(msg)
+            self._refresh_notes()
+            self._refresh_open_note(note_id)
+            if on_finish:
+                on_finish()
+
+        self._run_async(work, done)
+
+    def _push_note_now(self, note_id) -> None:
+        """Synchronous external push of a note (used inside an enrichment worker)."""
+        if self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        rec = self.store.get_note(note_id)
+        if not rec:
+            return
+        from . import external
+        try:
+            external.push_note(self._extern_note_rec(rec), cfg)
+        except Exception:
+            pass
+
     def _on_tab_changed(self, index: int) -> None:
         text = self.tabs.tabText(index).strip()
         if text.endswith("Summary"):
             self._refresh_meetings()
+        if text.endswith("Notes"):
+            self._populate_note_scope_combo()
+            self._refresh_notes()
         # Leaving Configuration -> warm up the configured models so there's no
         # cold-start download when the user hits Start.
         if getattr(self, "_prev_tab_text", "").endswith("Configuration") and not text.endswith("Configuration"):
@@ -948,7 +1383,26 @@ class MainWindow(QWidget):
   <li><b>Review</b> (✦ Summary): browse meetings, filter with <b>Show</b>
       (Personal / All / a team), and click a row to open notes + transcript. Rename,
       edit, find papers, export RDF, or send.</li>
+  <li><b>Take notes</b> (📝 Notes): write personal or team notes directly — see below.</li>
 </ol>
+
+<h2>Notes</h2>
+<p>The <b>📝 Notes</b> tab is for jottings you write yourself, with no recording. Each note
+gets the <b>same knowledge graph</b> as a meeting: on <b>Save &amp; enrich</b> an AI pass
+pulls out the salient <b>key terms</b> and links them to Wikipedia/Wikidata (and, if
+<i>Scientific literature</i> is on, related PubMed papers), all stored as RDF under the
+bundled MCO ontology's <code>Note</code> class.</p>
+<ul>
+  <li><b>Personal vs team:</b> pick <b>No team (personal)</b> to keep a note on this device,
+      or a team to sync it into that team's shared database.</li>
+  <li><b>Share a personal note:</b> open it and use <b>Share to team…</b> (or change its
+      <b>Team</b>) — it's pushed to the shared relational + graph databases, tagged to the team.</li>
+  <li><b>Link to a meeting:</b> set <b>About meeting</b> to connect a note to the meeting it
+      concerns (a <code>dcterms:relation</code> edge in the graph).</li>
+  <li><b>Export / view:</b> <b>Export RDF…</b> writes the note's graph (JSON-LD / Turtle).
+      The Notes <b>Show</b> menu views Personal / All / a team, just like Summary; shared
+      notes from teammates open read-only.</li>
+</ul>
 
 <h2>Capturing meeting (system) audio</h2>
 <p>To transcribe the other participants, route system audio through a virtual
@@ -2517,7 +2971,24 @@ are stored locally in a protected config file.</p>
                     external.GraphSink(cfg.graph).replace_all(recs)
                 except Exception as exc:
                     errs.append(f"graph: {exc}")
-            msg = f"Synced {len(recs)} meeting(s) to external database(s)."
+            # Notes: backfill them too (own relational tables + own notes graph).
+            note_recs = [self._extern_note_rec(n) for n
+                         in (self.store.get_note(x.get("id")) for x in self.store.list_notes(limit=5000))
+                         if n]
+            note_recs.sort(key=lambda r: r["id"])
+            if note_recs and cfg.relational.enabled and cfg.relational.url:
+                rs = external.structured_sink(cfg.relational)
+                for rec in note_recs:
+                    try:
+                        rs.upsert_note(rec)
+                    except Exception as exc:
+                        errs.append(f"note #{rec['id']} relational: {exc}")
+            if note_recs and cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
+                try:
+                    external.GraphSink(cfg.graph).replace_all_notes(note_recs)
+                except Exception as exc:
+                    errs.append(f"notes graph: {exc}")
+            msg = f"Synced {len(recs)} meeting(s) and {len(note_recs)} note(s) to external database(s)."
             if errs:
                 msg += f"  {len(errs)} error(s): " + " | ".join(errs[:3])
             return msg
@@ -3001,6 +3472,14 @@ are stored locally in a protected config file.</p>
                 self._start_stage(mid, stage)
             else:
                 self.store.mark_job(mid, stage, "done")  # no longer applicable - clear it
+        # Notes whose enrichment was interrupted (status='pending').
+        try:
+            note_pending = self.store.pending_note_jobs()
+        except Exception:
+            note_pending = []
+        for nid, stage in note_pending:
+            if stage == "enrich":
+                self._enrich_note_async(nid)
 
     def _crosslink_async(self, meeting_id, on_finish=None) -> None:
         """Let the agent link this meeting to related ones, across the team if centralized."""
@@ -4258,6 +4737,349 @@ class MeetingDetailDialog(QDialog):
         except Exception:
             pass
         self.accept()
+
+
+class NoteEditorDialog(QDialog):
+    """Create / view / edit a personal or team note.
+
+    On Save the note is persisted locally and an AI pass extracts its key terms
+    (linked to Wikipedia/Wikidata) and topics into the same knowledge graph as
+    meetings; if a team is selected (or the note is shared to one) it is synced
+    into the team's shared database. Shared (remote) notes open read-only.
+    """
+
+    def __init__(self, parent, rec: dict | None = None, remote: bool = False):
+        super().__init__(parent)
+        self._parent = parent
+        self._remote = remote
+        self._rec = dict(rec or {})
+        self._nid = self._rec.get("id")
+        self._new = rec is None
+        title = self._rec.get("title") or ("New note" if self._new else "Note")
+        self.setWindowTitle(f"MeetGraph — {title}" + ("  (shared)" if remote else ""))
+        self.setWindowIcon(app_icon())
+        self.resize(780, 760)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(12)
+
+        head = QLabel("Shared note (read-only)" if remote else
+                      ("New note" if self._new else "Edit note"))
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Read-only — shared by a teammate." if remote else
+                     "Write freely. On save, an AI pass links key terms to Wikipedia/Wikidata "
+                     "and files the note into the knowledge graph.")
+        sub.setObjectName("HeaderSubtitle")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        # --- top fields, grouped in a white card ---
+        card = QFrame(); card.setObjectName("Card")
+        form = QFormLayout(card)
+        form.setContentsMargins(16, 14, 16, 14)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        def _flabel(text):
+            lbl = QLabel(text); lbl.setObjectName("CardLabel"); return lbl
+
+        self.title_edit = QLineEdit(self._rec.get("title") or "")
+        self.title_edit.setPlaceholderText("Note title")
+        form.addRow(_flabel("Title"), self.title_edit)
+
+        self.team_combo = QComboBox()
+        self.team_combo.setToolTip("Keep the note personal, or share it into a team's shared database.")
+        self._populate_team_combo()
+        form.addRow(_flabel("Team"), self.team_combo)
+
+        self.meeting_combo = QComboBox()
+        self.meeting_combo.setToolTip("Optionally link this note to a meeting it's about.")
+        self._populate_meeting_combo()
+        form.addRow(_flabel("About meeting"), self.meeting_combo)
+
+        self.tags_edit = QLineEdit(self._rec.get("tags") or "")
+        self.tags_edit.setPlaceholderText("comma, separated, tags")
+        form.addRow(_flabel("Tags"), self.tags_edit)
+        v.addWidget(card)
+
+        body_label = QLabel("NOTE  ·  MARKDOWN")
+        body_label.setObjectName("SectionLabel")
+        v.addWidget(body_label)
+        self.body_edit = QTextEdit()
+        self.body_edit.setObjectName("transcript")
+        self.body_edit.setPlainText(self._rec.get("body_md") or "")
+        self.body_edit.setFont(QFont("SF Pro Text", 13))
+        self.body_edit.setPlaceholderText("Write your note here… Markdown is supported.")
+        v.addWidget(self.body_edit, 2)
+
+        kg_label = QLabel("KNOWLEDGE GRAPH  ·  AUTO-EXTRACTED ON SAVE")
+        kg_label.setObjectName("SectionLabel")
+        v.addWidget(kg_label)
+        self.kg_view = QTextBrowser()
+        self.kg_view.setObjectName("KGCard")
+        self.kg_view.setOpenExternalLinks(True)
+        self.kg_view.setMaximumHeight(180)
+        self.kg_view.setFont(QFont("SF Pro Text", 13))
+        v.addWidget(self.kg_view, 1)
+        self._refresh_kg_view()
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#0d9488; font-size:11px; font-weight:600;")
+        v.addWidget(self.status)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        if not remote:
+            self.save_btn = QPushButton("Save  +  enrich")
+            self.save_btn.setObjectName("primary")
+            self.save_btn.setToolTip("Save the note and extract its key terms/topics into the knowledge graph")
+            self.save_btn.clicked.connect(self._save)
+            row.addWidget(self.save_btn)
+            share = QPushButton("Share to team…")
+            share.setToolTip("Share this personal note into a team's shared database")
+            share.clicked.connect(self._share_to_team)
+            row.addWidget(share)
+        copy = QPushButton("Copy")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(
+            self.body_edit.toPlainText() if not remote else (self._rec.get("body_md") or "")))
+        row.addWidget(copy)
+        rdf = QPushButton("Export RDF…")
+        rdf.setToolTip("Export this note as a knowledge graph (JSON-LD / Turtle), key terms linked "
+                       "to Wikipedia/Wikidata.")
+        rdf.clicked.connect(self._export_rdf)
+        row.addWidget(rdf)
+        row.addStretch()
+        if not remote:
+            delete = QPushButton("Delete")
+            delete.setObjectName("danger")
+            delete.clicked.connect(self._delete)
+            row.addWidget(delete)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        v.addLayout(row)
+
+        if remote:
+            for w in (self.title_edit, self.tags_edit, self.body_edit,
+                      self.team_combo, self.meeting_combo):
+                w.setEnabled(False)
+            self.body_edit.setReadOnly(True)
+
+    # --- combos ---
+    def _active_teams(self) -> list[tuple]:
+        try:
+            memberships = self._parent.store.list_memberships()
+            revoked = {k.get("key_id") for k in self._parent.store.list_team_keys() if k.get("revoked")}
+        except Exception:
+            return []
+        return [(m.get("team_name") or m.get("team_id"), m.get("team_id")) for m in memberships
+                if (m.get("state") or "active") == "active" and m.get("key_id") not in revoked]
+
+    def _populate_team_combo(self) -> None:
+        self.team_combo.clear()
+        self.team_combo.addItem("No team (personal)", None)
+        for name, tid in self._active_teams():
+            self.team_combo.addItem(f"Team · {name}", tid)
+        cur = self._rec.get("team_id")
+        if cur:
+            idx = self.team_combo.findData(cur)
+            if idx < 0:  # team not in active list (e.g. a left team) - show it anyway
+                self.team_combo.addItem(f"Team · {self._parent._team_name(cur)}", cur)
+                idx = self.team_combo.findData(cur)
+            self.team_combo.setCurrentIndex(idx)
+        elif not self._rec and self._parent.team_id:
+            # New note: default to the active team if one is selected.
+            idx = self.team_combo.findData(self._parent.team_id)
+            self.team_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _populate_meeting_combo(self) -> None:
+        self.meeting_combo.clear()
+        self.meeting_combo.addItem("— none —", None)
+        try:
+            for m in self._parent.store.list_meetings(limit=200):
+                when = (m.started_at or m.created_at or "")[:10]
+                self.meeting_combo.addItem(f"{m.title or 'Meeting'} · {when}", m.id)
+        except Exception:
+            pass
+        cur = self._rec.get("about_meeting_id")
+        if cur:
+            idx = self.meeting_combo.findData(cur)
+            self.meeting_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    # --- knowledge-graph preview ---
+    def _enrichment(self) -> dict:
+        import json as _json
+        raw = self._rec.get("summary_json")
+        if raw:
+            try:
+                return _json.loads(raw)
+            except Exception:
+                pass
+        # Remote notes come with reconstructed term/topic lists instead of JSON.
+        if self._rec.get("_terms") or self._rec.get("_topics"):
+            return {"key_terms": [{"term": t} for t in self._rec.get("_terms") or []],
+                    "topics": [{"topic": t} for t in self._rec.get("_topics") or []]}
+        return {}
+
+    def _refresh_kg_view(self) -> None:
+        s = self._enrichment()
+        terms = s.get("key_terms") or []
+        topics = s.get("topics") or []
+        pubs = s.get("publications") or []
+        gaps = s.get("research_gaps") or []
+        if not (terms or topics or pubs or gaps):
+            self.kg_view.setMarkdown(
+                "_Not yet enriched — Save the note to extract key terms and link them to "
+                "Wikipedia/Wikidata._" if not self._remote else "_No extracted terms for this note._")
+            return
+        md: list[str] = []
+        if terms:
+            md.append("**Key terms**")
+            for kt in terms:
+                term = kt.get("term") or ""
+                label = f"[{term}]({kt.get('wikipedia')})" if kt.get("wikipedia") else term
+                gloss = f" — {kt['description']}" if kt.get("description") else ""
+                md.append(f"- {label}{gloss}")
+            md.append("")
+        if topics:
+            md.append("**Topics**")
+            for t in topics:
+                md.append(f"- {t.get('topic') or ''}")
+            md.append("")
+        if pubs:
+            md.append("**Related publications**")
+            for p in pubs:
+                cite = f"[{p.get('title')}]({p.get('url')})" if p.get("url") else (p.get("title") or "")
+                md.append(f"- {cite}")
+            md.append("")
+        if gaps:
+            md.append("**Research gaps**")
+            md += [f"- {g}" for g in gaps]
+        self.kg_view.setMarkdown("\n".join(md))
+
+    # --- actions ---
+    def _selected_team_id(self):
+        return self.team_combo.currentData()
+
+    def _selected_meeting_id(self):
+        return self.meeting_combo.currentData()
+
+    def _save(self) -> None:
+        if self._remote:
+            return
+        p = self._parent
+        title = self.title_edit.text().strip() or "Untitled note"
+        body = self.body_edit.toPlainText()
+        tags = self.tags_edit.text().strip()
+        team_id = self._selected_team_id()
+        about = self._selected_meeting_id()
+        try:
+            if self._new or self._nid is None:
+                self._nid = p.store.save_note(
+                    user=p.user, title=title, body_md=body, tags=tags, team_id=team_id,
+                    about_meeting_id=about, author_name=p._display_name, author_email=p.user_email)
+                self._new = False
+                p._audit("note_created", self._nid, title)
+            else:
+                prev = p.store.get_note(self._nid) or {}
+                p.store.update_note(self._nid, title, body, tags, about, edited_by=p._display_name)
+                if (prev.get("team_id") or None) != (team_id or None):
+                    p.store.set_note_team(self._nid, team_id)
+                    if team_id:
+                        p._audit("note_shared", self._nid, p._team_name(team_id))
+                p._audit("note_edited", self._nid, title)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save failed", f"Could not save the note: {exc}")
+            return
+        self.setWindowTitle(f"MeetGraph — {title}")
+        self._rec = p.store.get_note(self._nid) or self._rec
+        p._open_notes[self._nid] = self
+        self.status.setText("Saved · enriching into the knowledge graph…")
+        p._enrich_note_async(self._nid)
+        p._refresh_notes()
+
+    def _share_to_team(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        teams = self._active_teams()
+        if not teams:
+            QMessageBox.information(self, "No teams",
+                                   "Join a team in Configuration first, then share notes to it.")
+            return
+        names = [t[0] for t in teams]
+        choice, ok = QInputDialog.getItem(self, "Share to team",
+                                          "Share this note into the shared database of:", names, 0, False)
+        if not ok:
+            return
+        tid = dict((n, i) for n, i in teams).get(choice)
+        idx = self.team_combo.findData(tid)
+        if idx >= 0:
+            self.team_combo.setCurrentIndex(idx)
+        self._save()  # persists the team change, then enriches + syncs
+
+    def _export_rdf(self) -> None:
+        from . import kg
+
+        if self._new or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before exporting its graph.")
+            return
+        rec = (self._parent.store.get_note(self._nid) if not self._remote else self._rec) or self._rec
+        summary = self._enrichment()
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export note RDF", f"note-{self._nid}.ttl",
+            "Turtle (*.ttl);;JSON-LD (*.jsonld);;N-Quads (*.nq)")
+        if not path:
+            return
+        if path.endswith(".ttl"):
+            fmt = "turtle"
+        elif path.endswith(".nq"):
+            fmt = "nquads"
+        elif path.endswith((".jsonld", ".json")):
+            fmt = "jsonld"
+        else:
+            fmt = {"JSON-LD (*.jsonld)": "jsonld", "N-Quads (*.nq)": "nquads"}.get(selected, "turtle")
+            path += kg.EXTENSIONS[fmt]
+        try:
+            data = kg.serialize_note(rec, summary, fmt=fmt)
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not export RDF: {exc}")
+            return
+        reveal_in_file_manager(path)
+
+    def _delete(self) -> None:
+        if self._remote or self._nid is None:
+            self.accept()
+            return
+        if QMessageBox.question(
+            self, "Delete note", "Delete this note? This cannot be undone."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._parent.store.delete_note(self._nid)
+            self._parent._audit("note_deleted", self._nid, self._rec.get("title"))
+            self._parent._delete_note_remote_async(self._nid)
+            self._parent._open_notes.pop(self._nid, None)
+            self._parent._refresh_notes()
+        except Exception:
+            pass
+        self.accept()
+
+    def reload(self) -> None:
+        """Re-load enrichment after a background pass (without touching the editors)."""
+        if self._remote or self._nid is None:
+            return
+        rec = self._parent.store.get_note(self._nid)
+        if not rec:
+            return
+        self._rec = rec
+        self._refresh_kg_view()
+        if rec.get("summary_json"):
+            self.status.setText("✦ Enriched into the knowledge graph.")
 
 
 class ActivityLogDialog(QDialog):

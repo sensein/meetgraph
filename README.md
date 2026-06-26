@@ -17,7 +17,8 @@ and turns the conversation into structured, linked, shareable knowledge.
 - 🤖 **AI meeting notes** — a provider-agnostic Pydantic AI agent (Claude / OpenAI / OpenRouter / local Ollama) produces faithful notes (topics · decisions · open questions · action items), **fixes obvious transcription errors**, and is **editable** (with who-edited tracking)
 - 🧾 **Model provenance** — records which transcription and notes models produced each result, in the notes and the knowledge graph; a banner shows the models + API-key status
 - 🔗 **Key terms auto-linked to Wikipedia + Wikidata** (verified, clickable)
-- 🧠 **Knowledge graph** — every meeting exported as RDF (JSON-LD / Turtle / N-Quads) conforming to the bundled **MCO** ontology, with PROV temporal data
+- 📝 **Personal & team notes** — write notes directly (no recording): they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
+- 🧠 **Knowledge graph** — every meeting *and note* exported as RDF (JSON-LD / Turtle / N-Quads) conforming to the bundled **MCO** ontology, with PROV temporal data
 - 🕸️ **Automatic cross-meeting linking** — an agent connects related meetings (shared topics/entities, follow-ups, continuations)
 - 🔬 **PubMed** — for scientific discussions, links relevant publications (with a few key points each) and proposes **research gaps**
 - 👥 **Teams** — shareable keys centralize everyone's notes in one shared database; **join multiple teams and switch between them**; pick the team per meeting (or none) right in the Meeting tab; in-app team feed; audit log of who-did-what
@@ -177,7 +178,26 @@ links, cited publications, and team membership.
 
 ---
 
-## 7. Storage, databases & teams
+## 7. Notes (personal & team)
+
+The **📝 Notes** tab is for notes you write yourself — no recording involved. A note is
+treated as first-class knowledge: on **Save & enrich**, a provider-agnostic AI pass extracts
+its salient **key terms** and links them to **Wikipedia/Wikidata** (and, with *Scientific
+literature* enabled, related **PubMed** papers), exactly as for meetings. Everything is stored
+as RDF under the MCO ontology's new **`Note`** class.
+
+- **Personal or team:** choose *No team (personal)* to keep a note on this device, or a team to
+  sync it into that team's shared **relational + graph** databases (tagged with the team id).
+- **Share a personal note:** open it and click **Share to team…** (or change its **Team**) — the
+  note is pushed to the shared store and becomes visible to the team. Notes live in their own
+  named graph (`…/meetgraph/notes`), so a full meeting re-sync never disturbs them.
+- **Link to a meeting:** set **About meeting** to connect a note to the meeting it concerns
+  (a `dcterms:relation` edge to that meeting in the graph).
+- **Browse & export:** the Notes **Show** menu views **Personal / All / a team** (like Summary);
+  teammates' shared notes open read-only. **Export RDF…** writes a single note's graph
+  (JSON-LD / Turtle / N-Quads). Notes are included in **Sync all … now** backfills.
+
+## 8. Storage, databases & teams
 
 - **Local:** everything is stored in SQLite; the **Summary** tab is a searchable
   table; click a row for a detail window (copy / export `.md` / RDF / email / send).
@@ -206,7 +226,7 @@ links, cited publications, and team membership.
   - Every action (create / summary / delete / send / sync / join / leave / revoke) is
     recorded in an **audit log** with the member's name + email, mirrored centrally.
 
-## 8. Sending & sharing
+## 9. Sending & sharing
 
 Send a meeting's summary + transcript to:
 
@@ -232,12 +252,12 @@ meeting_transcriber/
   wikipedia.py    # Verified Wikipedia/Wikidata resolution
   pubmed.py       # NCBI E-utilities (search + abstracts)
   crosslink.py    # Automatic cross-meeting linking (deterministic + agent)
-  kg.py           # RDF/knowledge-graph build & serialize (pyoxigraph)
+  kg.py           # RDF/knowledge-graph build & serialize for meetings + notes (pyoxigraph)
   external.py     # Relational/Mongo + graph sinks; team revocation registry
   email_send.py   # SMTP delivery
   delivery.py     # REST + MCP delivery
   team.py         # Shareable team keys
-  storage.py      # SQLite (content DB + separate config DB; jobs, audit, links)
+  storage.py      # SQLite (meetings + notes content DB + separate config DB; jobs, audit, links)
   ui.py           # PyQt6 window
   skills/         # Bundled "meeting-notes" skill + MCO ontology (schemas/mco.yaml)
   __main__.py     # entry point  (python -m meeting_transcriber)

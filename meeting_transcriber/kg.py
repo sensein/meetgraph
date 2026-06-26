@@ -72,6 +72,10 @@ SKOS_RELATED = NamedNode("http://www.w3.org/2004/02/skos/core#related")
 DCT_RELATION = NamedNode("http://purl.org/dc/terms/relation")
 RDFS_COMMENT = NamedNode("http://www.w3.org/2000/01/rdf-schema#comment")
 SCHEMA_AGENT = NamedNode("http://schema.org/agent")
+SCHEMA_TEXT = NamedNode("http://schema.org/text")
+SCHEMA_KEYWORDS = NamedNode("http://schema.org/keywords")
+DCT_CREATED = NamedNode("http://purl.org/dc/terms/created")
+DCT_MODIFIED = NamedNode("http://purl.org/dc/terms/modified")
 ICAL_DUE = NamedNode("http://www.w3.org/2002/12/cal/ical#due")
 XSD_DATETIME = NamedNode("http://www.w3.org/2001/XMLSchema#dateTime")
 XSD_DATE = NamedNode("http://www.w3.org/2001/XMLSchema#date")
@@ -85,6 +89,7 @@ C_QUESTION = NamedNode(MCO + "OpenQuestion")
 C_KEYTERM = NamedNode(MCO + "KeyTerm")
 C_AGENT = NamedNode(MCO + "Agent")
 C_TEAM = NamedNode(MCO + "Team")
+C_NOTE = NamedNode(MCO + "Note")
 P_RELATED_MEETING = NamedNode(MCO + "relatedMeeting")
 # Relation type -> RDF predicate for cross-meeting links.
 _LINK_PREDICATE = {
@@ -133,6 +138,10 @@ EXTENSIONS = {"jsonld": ".jsonld", "turtle": ".ttl", "nquads": ".nq", "nt": ".nt
 # --- IRI helpers ----------------------------------------------------------- #
 def meeting_iri(meeting_id) -> str:
     return f"{BASE}meeting/{meeting_id}"
+
+
+def note_iri(note_id) -> str:
+    return f"{BASE}note/{note_id}"
 
 
 def _slug(text: str) -> str:
@@ -337,6 +346,123 @@ def quads_for_meeting(
         yield q(m, P_RELATED_MEETING, other)  # generic link too, for easy querying
 
 
+def quads_for_note(rec: dict, summary: dict | None = None, graph=None) -> Iterator[Quad]:
+    """Yield the RDF quads describing one note.
+
+    ``rec`` is a storage row from the ``notes`` table (id, title, body_md, tags,
+    team_id, about_meeting_id, author_name, created_at, updated_at). ``summary``
+    is the parsed enrichment JSON (the same shape used for meetings: key_terms,
+    topics, publications, research_gaps), or ``None`` if not yet enriched.
+    """
+    g = graph if graph is not None else DefaultGraph()
+    summary = summary or {}
+    nid = rec.get("id")
+    n = NamedNode(note_iri(nid))
+
+    def q(s, p, o):
+        return Quad(s, p, o, g)
+
+    title = (rec.get("title") or f"Note {nid}").strip()
+    yield q(n, RDF_TYPE, C_NOTE)
+    yield q(n, RDFS_LABEL, Literal(title))
+    yield q(n, DCT_TITLE, Literal(title))
+    body = rec.get("body_md")
+    if body:
+        yield q(n, SCHEMA_TEXT, Literal(body))
+    created = _dt_literal(rec.get("created_at"))
+    if created is not None:
+        yield q(n, DCT_CREATED, created)
+        yield q(n, PROV_GENERATED, created)
+    modified = _dt_literal(rec.get("updated_at"))
+    if modified is not None:
+        yield q(n, DCT_MODIFIED, modified)
+
+    # Author (the person who wrote the note) - prov:wasAttributedTo an Agent.
+    author = rec.get("author_name")
+    if author and author.strip() and not _is_anon_speaker(author):
+        a = NamedNode(f"{note_iri(nid)}/agent/{_slug(author)}")
+        yield q(a, RDF_TYPE, C_AGENT)
+        yield q(a, FOAF_NAME, Literal(author))
+        yield q(n, PROV_ATTRIBUTED, a)
+
+    # Tags / keywords (comma-separated in storage).
+    for tag in (rec.get("tags") or "").split(","):
+        tag = tag.strip()
+        if tag:
+            yield q(n, SCHEMA_KEYWORDS, Literal(tag))
+
+    # The meeting this note is about, if any.
+    about = rec.get("about_meeting_id")
+    if about:
+        yield q(n, DCT_RELATION, NamedNode(meeting_iri(about)))
+
+    # Topics (auto-extracted)
+    for i, t in enumerate(summary.get("topics") or []):
+        node = NamedNode(f"{note_iri(nid)}/topic/{i}")
+        yield q(node, RDF_TYPE, C_TOPIC)
+        topic_name = (t.get("topic") or "").strip()
+        if topic_name:
+            yield q(node, SKOS_PREFLABEL, Literal(topic_name))
+            yield q(node, RDFS_LABEL, Literal(topic_name))
+        for p in t.get("points") or []:
+            if p:
+                yield q(node, P_POINT, Literal(p))
+        yield q(n, P_HAS_TOPIC, node)
+
+    # Key terms -> Wikipedia / Wikidata (auto-extracted + verified)
+    for kt in summary.get("key_terms") or []:
+        term = (kt.get("term") or "").strip()
+        if not term:
+            continue
+        node = NamedNode(f"{note_iri(nid)}/term/{_slug(term)}")
+        yield q(node, RDF_TYPE, C_KEYTERM)
+        yield q(node, SKOS_PREFLABEL, Literal(term))
+        yield q(node, RDFS_LABEL, Literal(term))
+        if kt.get("description"):
+            yield q(node, DCT_DESCRIPTION, Literal(kt["description"]))
+        if kt.get("wikipedia"):
+            yield q(node, RDFS_SEEALSO, NamedNode(kt["wikipedia"]))
+        if kt.get("wikidata"):
+            yield q(node, OWL_SAMEAS, NamedNode(kt["wikidata"]))
+        yield q(n, P_HAS_KEYTERM, node)
+
+    # Related scientific publications + research gaps
+    for i, pub in enumerate(summary.get("publications") or []):
+        node = NamedNode(f"{note_iri(nid)}/publication/{i}")
+        yield q(node, RDF_TYPE, C_PUBLICATION)
+        if pub.get("title"):
+            yield q(node, DCT_TITLE, Literal(pub["title"]))
+            yield q(node, RDFS_LABEL, Literal(pub["title"]))
+        if pub.get("url"):
+            yield q(node, RDFS_SEEALSO, NamedNode(pub["url"]))
+        if pub.get("doi"):
+            yield q(node, OWL_SAMEAS, NamedNode("https://doi.org/" + pub["doi"]))
+        cite = " ".join(x for x in [pub.get("authors"), pub.get("journal"), pub.get("year")] if x)
+        if cite:
+            yield q(node, DCT_BIBLIO, Literal(cite))
+        for pt in pub.get("points") or []:
+            if pt:
+                yield q(node, P_POINT, Literal(pt))
+        yield q(n, DCT_REFERENCES, node)
+    for gap in summary.get("research_gaps") or []:
+        if gap:
+            yield q(n, P_RESEARCH_GAP, Literal(gap))
+
+    # Team membership (shared, centralized graph)
+    team_id = rec.get("team_id")
+    if team_id:
+        team = NamedNode(team_iri(team_id))
+        yield q(team, RDF_TYPE, C_TEAM)
+        yield q(n, SCHEMA_ISPARTOF, team)
+
+
+def serialize_note(rec: dict, summary: dict | None = None, fmt: str = "jsonld") -> bytes:
+    """Build an in-memory graph for one note and serialize it."""
+    store = Store()
+    store.extend(list(quads_for_note(rec, summary, graph=None)))
+    return _dump(store, fmt, from_graph=DefaultGraph())
+
+
 def _dump(store: Store, fmt: str, from_graph=None) -> bytes:
     rf = _FORMATS[fmt]
     buf = io.BytesIO()
@@ -389,6 +515,11 @@ class MeetingGraph:
         g = NamedNode(meeting_iri(rec.get("id")))
         self.store.remove_graph(g)  # idempotent re-ingest (summaries get updated)
         self.store.extend(list(quads_for_meeting(rec, summary, prev_ids, graph=g, links=links)))
+
+    def ingest_note(self, rec: dict, summary: dict | None = None) -> None:
+        g = NamedNode(note_iri(rec.get("id")))
+        self.store.remove_graph(g)  # idempotent re-ingest
+        self.store.extend(list(quads_for_note(rec, summary, graph=g)))
 
     def export_meeting(self, meeting_id, fmt: str = "jsonld") -> bytes:
         return _dump(self.store, fmt, from_graph=NamedNode(meeting_iri(meeting_id)))

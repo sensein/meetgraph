@@ -43,6 +43,7 @@ prefixes:
   skos: http://www.w3.org/2004/02/skos/core#
   foaf: http://xmlns.com/foaf/0.1/
   ical: http://www.w3.org/2002/12/cal/ical#
+  sioc: http://rdfs.org/sioc/ns#
 
 default_prefix: mco
 default_range: string
@@ -175,6 +176,37 @@ classes:
       - schema:Organization
     slots:
       - name
+
+  Note:
+    is_a: NamedThing
+    description: >-
+      A note authored by a person — a personal jotting or a team note — outside
+      of (or alongside) a meeting. Unlike a `Meeting`, a note has no transcript
+      and is written directly. It carries free-text `note_body`, an `author`, the
+      times it was `created`/`modified`, optional `keyword` tags, and the same
+      knowledge-graph surface as a meeting: topics, salient key terms (linked to
+      Wikipedia/Wikidata), and related scientific publications, all extracted
+      automatically. A note may belong to a team (`part_of_team`) so it shares the
+      team's centralized graph, and may be `about_meeting` a meeting it concerns.
+      A personal note shared to a team simply gains a `part_of_team` link.
+    broad_mappings:
+      - prov:Entity
+      - schema:NoteDigitalDocument
+    close_mappings:
+      - schema:NoteDigitalDocument
+    slots:
+      - title
+      - note_body
+      - created
+      - modified
+      - author
+      - keyword
+      - about_meeting
+      - has_topic
+      - has_key_term
+      - references
+      - research_gap
+      - part_of_team
 
   Publication:
     is_a: NamedThing
@@ -337,6 +369,43 @@ slots:
     range: string
     multivalued: true
     description: Research gaps / open problems raised, relative to the literature.
+
+  # --- Note ---
+  note_body:
+    slot_uri: schema:text
+    exact_mappings: [schema:text]
+    close_mappings: [dcterms:description, sioc:content]
+    description: The free-text body of the note (Markdown), as written by the author.
+  created:
+    slot_uri: dcterms:created
+    exact_mappings: [dcterms:created]
+    close_mappings: [prov:generatedAtTime, schema:dateCreated]
+    range: datetime
+    description: When the note was first created.
+  modified:
+    slot_uri: dcterms:modified
+    exact_mappings: [dcterms:modified]
+    close_mappings: [schema:dateModified]
+    range: datetime
+    description: When the note was last edited.
+  author:
+    slot_uri: prov:wasAttributedTo
+    exact_mappings: [prov:wasAttributedTo]
+    close_mappings: [schema:author, dcterms:creator]
+    range: Agent
+    description: The person who wrote the note.
+  keyword:
+    slot_uri: schema:keywords
+    exact_mappings: [schema:keywords]
+    close_mappings: [dcterms:subject]
+    multivalued: true
+    description: Free-text tags the author attached to the note.
+  about_meeting:
+    slot_uri: dcterms:relation
+    exact_mappings: [dcterms:relation]
+    close_mappings: [schema:about]
+    range: Meeting
+    description: A meeting this note is about / concerns, if any.
 
   # --- Topic ---
   pref_label:

@@ -86,6 +86,43 @@ class Store:
                 )
                 """
             )
+            # Notes - personal or team jottings authored directly (no transcript).
+            # team_id NULL => personal; setting it shares the note to that team.
+            # summary_json holds the same enrichment shape as a meeting summary
+            # (key_terms / topics / publications / research_gaps).
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notes (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user            TEXT,
+                    title           TEXT,
+                    body_md         TEXT,
+                    tags            TEXT,
+                    summary_json    TEXT,
+                    team_id         TEXT,
+                    about_meeting_id INTEGER,
+                    author_name     TEXT,
+                    author_email    TEXT,
+                    created_at      TEXT,
+                    updated_at      TEXT,
+                    edited_by       TEXT,
+                    edited_at       TEXT
+                )
+                """
+            )
+            # Background enrichment jobs for notes (key-term/topic extraction,
+            # literature) - mirrors meeting_jobs so status shows and resumes.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS note_jobs (
+                    note_id     INTEGER,
+                    stage       TEXT,
+                    status      TEXT,
+                    updated_at  TEXT,
+                    PRIMARY KEY (note_id, stage)
+                )
+                """
+            )
             # Links between meetings discovered by the cross-link agent.
             con.execute(
                 """
@@ -478,3 +515,112 @@ class Store:
     def delete_meeting(self, meeting_id: int) -> None:
         with self._connect() as con:
             con.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+
+    # ------------------------------------------------------------------ notes
+    _NOTE_LIST_COLS = ("id, user, title, tags, team_id, about_meeting_id, "
+                       "author_name, author_email, created_at, updated_at, edited_by, edited_at")
+
+    def save_note(
+        self,
+        user: str,
+        title: str,
+        body_md: str,
+        tags: str = "",
+        team_id: str | None = None,
+        about_meeting_id: int | None = None,
+        author_name: str = "",
+        author_email: str = "",
+        summary_json: str | None = None,
+    ) -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            cur = con.execute(
+                """INSERT INTO notes
+                   (user, title, body_md, tags, summary_json, team_id, about_meeting_id,
+                    author_name, author_email, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user, title, body_md, tags, summary_json, team_id, about_meeting_id,
+                 author_name, author_email, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def update_note(
+        self,
+        note_id: int,
+        title: str,
+        body_md: str,
+        tags: str = "",
+        about_meeting_id: int | None = None,
+        edited_by: str = "",
+    ) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            con.execute(
+                "UPDATE notes SET title = ?, body_md = ?, tags = ?, about_meeting_id = ?, "
+                "updated_at = ?, edited_by = ?, edited_at = ? WHERE id = ?",
+                (title, body_md, tags, about_meeting_id, now, edited_by, now, note_id),
+            )
+
+    def set_note_enrichment(self, note_id: int, summary_json: str) -> None:
+        with self._connect() as con:
+            con.execute("UPDATE notes SET summary_json = ? WHERE id = ?", (summary_json, note_id))
+
+    def set_note_team(self, note_id: int, team_id: str | None) -> None:
+        """Share a personal note to a team (or move it back to personal)."""
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            con.execute("UPDATE notes SET team_id = ?, updated_at = ? WHERE id = ?",
+                        (team_id, now, note_id))
+
+    def list_notes(self, user: str | None = None, limit: int = 500) -> list[dict]:
+        q = f"SELECT {self._NOTE_LIST_COLS} FROM notes"
+        args: tuple = ()
+        if user:
+            q += " WHERE user = ?"
+            args = (user,)
+        q += " ORDER BY id DESC LIMIT ?"
+        args = args + (limit,)
+        with self._connect() as con:
+            return [dict(r) for r in con.execute(q, args).fetchall()]
+
+    def search_notes(self, query: str, limit: int = 500) -> list[dict]:
+        if not query.strip():
+            return self.list_notes(limit=limit)
+        like = f"%{query.strip()}%"
+        q = (f"SELECT {self._NOTE_LIST_COLS} FROM notes "
+             "WHERE title LIKE ? OR body_md LIKE ? OR tags LIKE ? "
+             "ORDER BY id DESC LIMIT ?")
+        with self._connect() as con:
+            return [dict(r) for r in con.execute(q, (like, like, like, limit)).fetchall()]
+
+    def get_note(self, note_id: int) -> dict | None:
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+            return dict(row) if row else None
+
+    def delete_note(self, note_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            con.execute("DELETE FROM note_jobs WHERE note_id = ?", (note_id,))
+
+    def mark_note_job(self, note_id: int, stage: str, status: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO note_jobs(note_id, stage, status, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(note_id, stage) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
+                (note_id, stage, status, datetime.now().isoformat(timespec="seconds")),
+            )
+
+    def note_jobs_for(self, note_id: int) -> dict:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT stage, status FROM note_jobs WHERE note_id = ?", (note_id,)
+            ).fetchall()
+            return {r["stage"]: r["status"] for r in rows}
+
+    def pending_note_jobs(self) -> list[tuple]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT note_id, stage FROM note_jobs WHERE status = 'pending'"
+            ).fetchall()
+            return [(r["note_id"], r["stage"]) for r in rows]
