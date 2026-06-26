@@ -287,6 +287,12 @@ class RelationalSink:
                 Column("note_id", BigInteger, index=True),
                 Column("ord", Integer), Column("topic", Text), Column("points", Text),
             ),
+            "note_links": Table(
+                "meetgraph_note_links", self._meta, pk(),
+                Column("note_id", BigInteger, index=True),
+                Column("target_kind", Text), Column("target_id", BigInteger),
+                Column("relation", Text), Column("reason", Text),
+            ),
         }
         self._meta.create_all(self._engine)
 
@@ -376,13 +382,19 @@ class RelationalSink:
              "points": _json.dumps(t.get("points") or [])}
             for i, t in enumerate(summary.get("topics") or [])
         ]
+        link_rows = [
+            {"note_id": nid, "target_kind": l.get("kind"), "target_id": l.get("id"),
+             "relation": l.get("relation"), "reason": l.get("reason")}
+            for l in (rec.get("links") or []) if l.get("id") is not None
+        ]
         t = self._t
         with self._engine.begin() as conn:
-            for name in ("note_key_terms", "note_topics"):
+            for name in ("note_key_terms", "note_topics", "note_links"):
                 conn.execute(delete(t[name]).where(t[name].c.note_id == nid))
             conn.execute(delete(t["notes"]).where(t["notes"].c.id == nid))
             conn.execute(insert(t["notes"]).values(**parent))
-            for name, rows in (("note_key_terms", terms), ("note_topics", topics)):
+            for name, rows in (("note_key_terms", terms), ("note_topics", topics),
+                               ("note_links", link_rows)):
                 if rows:
                     conn.execute(insert(t[name]), rows)
 
@@ -391,7 +403,7 @@ class RelationalSink:
 
         t = self._t
         with self._engine.begin() as conn:
-            for name in ("note_key_terms", "note_topics"):
+            for name in ("note_key_terms", "note_topics", "note_links"):
                 conn.execute(delete(t[name]).where(t[name].c.note_id == note_id))
             conn.execute(delete(t["notes"]).where(t["notes"].c.id == note_id))
 
@@ -548,6 +560,7 @@ class MongoSink:
         doc = {c: rec.get(c) for c in _NOTE_COLS}
         doc["_id"] = rec.get("id")
         doc["summary"] = summary
+        doc["links"] = rec.get("links") or []
         self._db.notes.replace_one({"_id": doc["_id"]}, doc, upsert=True)
 
     def delete_note(self, note_id) -> None:
