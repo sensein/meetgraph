@@ -1,0 +1,62 @@
+# Publish the `meetgraph` package to PyPI when a version tag is pushed.
+#
+# Release flow:  bump `version` in pyproject.toml → commit → tag → push the tag:
+#     git tag v0.2.0 && git push origin v0.2.0
+#
+# ONE-TIME SETUP — PyPI Trusted Publishing (recommended, no stored secrets).
+# On https://pypi.org → your project → Publishing → "Add a pending publisher":
+#     • PyPI Project Name:  meetgraph
+#     • Owner:              e.g., tekrajchhetri
+#     • Repository name:    meetgraph
+#     • Workflow name:      publish.yml          (this file's name — keep in sync)
+#     • Environment name:   pypi                 (matches `environment:` below)
+# The `id-token: write` permission lets the job mint a short-lived OIDC token.
+# (API-token alternative: add a PYPI_API_TOKEN secret and pass it as `password:`
+#  to the publish step, then drop the `id-token`/`environment` lines.)
+
+name: Release
+
+on:
+  push:
+    tags:
+      # GitHub Actions tag filters are GLOB, not regex: `.` is a literal here —
+      # no backslash. A `\.` pattern matches a literal backslash and silently
+      # fails to fire on a real tag push. Matches v0.1.0, v1.2.3-rc.1, v2.0.0-beta.1.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write   # Required for Trusted Publishing (OIDC)
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build tooling
+        run: pip install build twine
+
+      - name: Build sdist + wheel
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
