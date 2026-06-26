@@ -455,6 +455,18 @@ def quads_for_note(rec: dict, summary: dict | None = None, graph=None) -> Iterat
         yield q(team, RDF_TYPE, C_TEAM)
         yield q(n, SCHEMA_ISPARTOF, team)
 
+    # Auto-discovered links to related meetings and notes.
+    for link in rec.get("links") or []:
+        tid = link.get("id")
+        if tid is None:
+            continue
+        tk = link.get("kind")
+        target = NamedNode(meeting_iri(tid) if tk == "meeting" else note_iri(tid))
+        pred = _LINK_PREDICATE.get(link.get("relation"), SKOS_RELATED)
+        yield q(n, pred, target)
+        yield q(n, DCT_RELATION, target)
+        yield q(n, P_RELATED_MEETING, target)  # generic "related resource" for easy querying
+
 
 def serialize_note(rec: dict, summary: dict | None = None, fmt: str = "jsonld") -> bytes:
     """Build an in-memory graph for one note and serialize it."""

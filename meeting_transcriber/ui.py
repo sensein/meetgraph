@@ -11,9 +11,13 @@ import threading
 
 from PyQt6.QtCore import Qt, QObject, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
+    QBrush,
+    QColor,
     QFont,
     QIcon,
     QKeySequence,
+    QPainter,
+    QPen,
     QPixmap,
     QShortcut,
     QTextCharFormat,
@@ -30,6 +34,8 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsScene,
+    QGraphicsView,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -325,6 +331,7 @@ class MainWindow(QWidget):
         self.tabs.addTab(self._build_record_tab(), "  ◉  Meeting  ")
         self.tabs.addTab(self._build_notes_tab(), "  📝  Notes  ")
         self.tabs.addTab(self._build_summary_tab(), "  ✦  Summary  ")
+        self.tabs.addTab(self._build_graph_tab(), "  🕸  Graph  ")
         self.tabs.addTab(self._build_config_tab(), "  ⚙  Configuration  ")
         self.tabs.addTab(self._build_help_tab(), "  ❓  Help  ")
         self.tabs.addTab(self._build_about_tab(), "  ℹ  About  ")
@@ -563,6 +570,19 @@ class MainWindow(QWidget):
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#64748b; font-size:12px;")
         v.addWidget(intro)
+
+        opt_row = QHBoxLayout(); opt_row.setSpacing(8)
+        self.note_autolink = QCheckBox("Auto-link new notes to related meetings & notes")
+        self.note_autolink.setToolTip(
+            "When on, saving a note runs an agent that links it to related meeting summaries and "
+            "notes (shared topics/entities). Links show under “Related”, feed the knowledge graph, "
+            "and sync to your team.")
+        self.note_autolink.setChecked((self.store.get_setting("notes.autolink") or "0") == "1")
+        self.note_autolink.toggled.connect(
+            lambda on: self.store.set_setting("notes.autolink", "1" if on else "0"))
+        opt_row.addWidget(self.note_autolink)
+        opt_row.addStretch()
+        v.addLayout(opt_row)
 
         srow = QHBoxLayout(); srow.setSpacing(8)
         self.note_search = QLineEdit()
@@ -850,10 +870,19 @@ class MainWindow(QWidget):
                 pass
 
     def _extern_note_rec(self, rec: dict) -> dict:
-        """Copy of a note record with id (and about_meeting_id) mapped to global ids."""
+        """Copy of a note record with id, about_meeting_id and link targets mapped
+        to global ids, so it doesn't collide with teammates' content."""
         rec = dict(rec)
-        if rec.get("id") is not None:
-            rec["id"] = self._gid(rec["id"])
+        nid = rec.get("id")
+        if not rec.get("links") and nid is not None:
+            try:
+                rec["links"] = self.store.get_note_links(nid)
+            except Exception:
+                rec["links"] = []
+        # Map each link's target id to its global id (kind preserved).
+        rec["links"] = [{**l, "id": self._gid(l.get("id"))} for l in (rec.get("links") or [])]
+        if nid is not None:
+            rec["id"] = self._gid(nid)
         if rec.get("about_meeting_id"):
             rec["about_meeting_id"] = self._gid(rec["about_meeting_id"])
         return rec
@@ -908,6 +937,8 @@ class MainWindow(QWidget):
             max_results = int(self.pubmed_max.text().strip() or "8")
         except ValueError:
             max_results = 8
+        autolink = (self.note_autolink.isChecked() if hasattr(self, "note_autolink")
+                    else (self.store.get_setting("notes.autolink") or "0") == "1")
         name, email, team_id = self._display_name, self.user_email, self.team_id or None
         try:
             self.store.mark_note_job(note_id, "enrich", "pending")
@@ -917,12 +948,15 @@ class MainWindow(QWidget):
         self._refresh_notes()
 
         def work():
+            import json as _json
+
             from .agent import NoteEnrichmentAgent, link_key_terms, link_literature
 
             rec = self.store.get_note(note_id)
             if not rec:
                 return ""
             body = rec.get("body_md") or ""
+            enriched = False
             if body.strip():
                 try:
                     agent = NoteEnrichmentAgent(
@@ -934,10 +968,25 @@ class MainWindow(QWidget):
                         link_literature(enr, api_key=pubmed_key or None,
                                         max_results=max_results, provider_cfg=provider_cfg)
                     self.store.set_note_enrichment(note_id, enr.model_dump_json(indent=2))
+                    enriched = True
                 except Exception as exc:
                     # Keep the note; just report that enrichment couldn't run (e.g. no API key).
                     self._push_note_now(note_id)
                     return f"Note saved — enrichment skipped ({type(exc).__name__})."
+            # Auto-link to related meetings + notes (needs the extracted terms/topics).
+            if autolink and enriched:
+                try:
+                    from . import crosslink
+
+                    rec2 = self.store.get_note(note_id)
+                    summary = _json.loads(rec2.get("summary_json") or "") if rec2.get("summary_json") else {}
+                    target = crosslink.digest_of_note(note_id, rec2.get("title") or "", summary)
+                    others = (crosslink.digests_from_store(self.store)
+                              + crosslink.note_digests_from_store(self.store, exclude_id=note_id))
+                    links = crosslink.cross_link_note(target, others, provider_cfg)
+                    self.store.set_note_links(note_id, links)
+                except Exception:
+                    pass
             self._push_note_now(note_id)
             try:
                 entry = self.store.log_action("note_enriched", name, email, team_id, note_id)
@@ -980,6 +1029,192 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
+    # ----- knowledge graph (Graph tab) -----
+    def _build_graph_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("RecordPage")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(2, 10, 2, 2)
+        v.setSpacing(10)
+
+        intro = QLabel(
+            "Your knowledge graph — meetings, notes, the key terms they share, teams, and the links "
+            "between them. Scroll to zoom, drag to pan, and double-click a meeting or note to open "
+            "and edit it (changes sync as usual).")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#64748b; font-size:12px;")
+        v.addWidget(intro)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(QLabel("Show:"))
+        self.graph_scope_combo = QComboBox()
+        self.graph_scope_combo.currentIndexChanged.connect(self._refresh_graph)
+        self._populate_graph_scope_combo()
+        row.addWidget(self.graph_scope_combo)
+        # Legend
+        for label, color in (("Meeting", "#2563eb"), ("Note", "#0d9488"),
+                             ("Key term", "#f59e0b"), ("Team", "#7c3aed")):
+            chip = QLabel(f"●  {label}")
+            chip.setStyleSheet(f"color:{color}; font-weight:700; font-size:11px;")
+            row.addWidget(chip)
+        row.addStretch()
+        refresh = QPushButton("↻ Refresh")
+        refresh.clicked.connect(self._refresh_graph)
+        row.addWidget(refresh)
+        fit = QPushButton("Fit")
+        fit.setToolTip("Fit the whole graph in view")
+        fit.clicked.connect(lambda: self.graph_canvas.fit())
+        row.addWidget(fit)
+        v.addLayout(row)
+
+        self.graph_canvas = _GraphCanvas(self._open_graph_node)
+        v.addWidget(self.graph_canvas, 1)
+        self.graph_count = QLabel("")
+        self.graph_count.setStyleSheet("color:#64748b; font-size:12px;")
+        v.addWidget(self.graph_count)
+        return page
+
+    def _populate_graph_scope_combo(self) -> None:
+        if not hasattr(self, "graph_scope_combo"):
+            return
+        prev = self.graph_scope_combo.currentData()
+        self.graph_scope_combo.blockSignals(True)
+        self.graph_scope_combo.clear()
+        try:
+            memberships = self.store.list_memberships()
+        except Exception:
+            memberships = []
+        self.graph_scope_combo.addItem("All (personal + teams)", ("all", None))
+        self.graph_scope_combo.addItem("Personal (this device)", ("personal", None))
+        for m in memberships:
+            name = m.get("team_name") or m.get("team_id")
+            self.graph_scope_combo.addItem(f"Team · {name}", ("team", m.get("team_id")))
+        idx = self.graph_scope_combo.findData(prev) if prev else -1
+        self.graph_scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.graph_scope_combo.blockSignals(False)
+
+    def _build_graph_model(self, kind: str, team_id):
+        """Build (nodes, edges) for the local knowledge graph in the chosen scope."""
+        import json as _json
+
+        nodes: dict = {}
+        edges: list = []
+
+        def add(key, label, nkind, ref=None):
+            if key not in nodes:
+                nodes[key] = {"label": label, "kind": nkind, "ref": ref}
+            return key
+
+        def want(tid):
+            if kind == "personal":
+                return not tid
+            if kind == "team":
+                return tid == team_id
+            return True
+
+        try:
+            meetings = self.store.list_meetings(limit=2000)
+        except Exception:
+            meetings = []
+        try:
+            notes = self.store.list_notes(limit=2000)
+        except Exception:
+            notes = []
+        mids = {m.id for m in meetings if want(m.team_id)}
+        nids = {n["id"] for n in notes if want(n.get("team_id"))}
+
+        def add_terms(owner_key, summary):
+            for kt in (summary.get("key_terms") or [])[:8]:
+                term = (kt.get("term") or "").strip()
+                if not term:
+                    continue
+                tk = add(f"t:{term.lower()}", term, "term")
+                edges.append((owner_key, tk))
+
+        for m in meetings:
+            if m.id not in mids:
+                continue
+            mk = add(f"m{m.id}", m.title or f"Meeting {m.id}", "meeting", m.id)
+            if m.team_id:
+                edges.append((mk, add(f"team:{m.team_id}", self._team_name(m.team_id), "team")))
+            rec = self.store.get_meeting(m.id)
+            if rec and rec.get("summary_json"):
+                try:
+                    add_terms(mk, _json.loads(rec["summary_json"]))
+                except Exception:
+                    pass
+            try:
+                for l in self.store.get_links(m.id):
+                    if l.get("related_id") in mids:
+                        edges.append((mk, f"m{l['related_id']}"))
+            except Exception:
+                pass
+
+        for n in notes:
+            if n["id"] not in nids:
+                continue
+            nk = add(f"n{n['id']}", n.get("title") or f"Note {n['id']}", "note", n["id"])
+            if n.get("team_id"):
+                edges.append((nk, add(f"team:{n['team_id']}", self._team_name(n["team_id"]), "team")))
+            rec = self.store.get_note(n["id"])
+            if rec and rec.get("summary_json"):
+                try:
+                    add_terms(nk, _json.loads(rec["summary_json"]))
+                except Exception:
+                    pass
+            if n.get("about_meeting_id") in mids:
+                edges.append((nk, f"m{n['about_meeting_id']}"))
+            try:
+                for l in self.store.get_note_links(n["id"]):
+                    tid = l.get("id")
+                    if l.get("kind") == "meeting" and tid in mids:
+                        edges.append((nk, f"m{tid}"))
+                    elif l.get("kind") == "note" and tid in nids:
+                        edges.append((nk, f"n{tid}"))
+            except Exception:
+                pass
+
+        dropped = False
+        if len(nodes) > 320:  # keep it legible: drop key-term nodes on very large graphs
+            term_keys = {k for k, mta in nodes.items() if mta["kind"] == "term"}
+            nodes = {k: vv for k, vv in nodes.items() if k not in term_keys}
+            edges = [(a, b) for a, b in edges if a in nodes and b in nodes]
+            dropped = True
+        return nodes, edges, dropped
+
+    def _refresh_graph(self) -> None:
+        if not hasattr(self, "graph_canvas"):
+            return
+        scope = self.graph_scope_combo.currentData() if hasattr(self, "graph_scope_combo") else ("all", None)
+        kind, team_id = scope if scope else ("all", None)
+        nodes, edges, dropped = self._build_graph_model(kind, team_id)
+        pos = _force_graph_layout(list(nodes.keys()), edges)
+        self.graph_canvas.set_graph(nodes, edges, pos)
+        n_m = sum(1 for v in nodes.values() if v["kind"] == "meeting")
+        n_n = sum(1 for v in nodes.values() if v["kind"] == "note")
+        n_t = sum(1 for v in nodes.values() if v["kind"] == "term")
+        msg = f"{n_m} meeting(s) · {n_n} note(s) · {n_t} key term(s) · {len(edges)} link(s)"
+        if dropped:
+            msg += "  ·  key terms hidden (graph too large) — narrow the scope to see them"
+        elif not nodes:
+            msg = "Nothing in this scope yet — record a meeting or write a note."
+        self.graph_count.setText(msg)
+
+    def _open_graph_node(self, kind: str, ref) -> None:
+        """Double-clicking a meeting/note node opens its editor (edits sync on save)."""
+        try:
+            if kind == "meeting":
+                rec = self.store.get_meeting(ref)
+                if rec:
+                    MeetingDetailDialog(self, rec).exec()
+            elif kind == "note":
+                rec = self.store.get_note(ref)
+                if rec:
+                    NoteEditorDialog(self, rec).exec()
+        except Exception:
+            return
+        self._refresh_graph()
+
     def _on_tab_changed(self, index: int) -> None:
         text = self.tabs.tabText(index).strip()
         if text.endswith("Summary"):
@@ -987,6 +1222,9 @@ class MainWindow(QWidget):
         if text.endswith("Notes"):
             self._populate_note_scope_combo()
             self._refresh_notes()
+        if text.endswith("Graph"):
+            self._populate_graph_scope_combo()
+            self._refresh_graph()
         # Leaving Configuration -> warm up the configured models so there's no
         # cold-start download when the user hits Start.
         if getattr(self, "_prev_tab_text", "").endswith("Configuration") and not text.endswith("Configuration"):
@@ -1446,7 +1684,17 @@ bundled MCO ontology's <code>Note</code> class.</p>
       or <b>Send…</b> it to REST / MCP / your databases — the same options as a meeting summary.
       Use <b>⇪ Send…</b> on the Notes tab for bulk send/sync. The Notes <b>Show</b> menu views
       Personal / All / a team; shared notes from teammates open read-only.</li>
+  <li><b>Auto-link (opt-in):</b> tick <b>Auto-link new notes to related meetings &amp; notes</b>.
+      On save, an agent links the note to genuinely related meeting summaries and notes; they appear
+      under <b>Related meetings &amp; notes</b>, are written into the graph, and sync to your team.</li>
 </ul>
+
+<h2>Graph</h2>
+<p>The <b>🕸 Graph</b> tab visualises your knowledge graph — meetings, notes, the key terms they
+share, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>Fit</b> to
+recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Double-click a meeting or note</b>
+to open and edit it — your changes save and sync, then the graph refreshes. Colours: blue = meeting,
+teal = note, amber = key term, purple = team.</p>
 
 <h2>Capturing meeting (system) audio</h2>
 <p>To transcribe the other participants, route system audio through a virtual
@@ -5327,14 +5575,41 @@ class NoteEditorDialog(QDialog):
             md += [f"- {g}" for g in gaps]
         return "\n".join(md)
 
+    def _related_markdown(self) -> str:
+        """Markdown for auto-linked related meetings/notes (local notes only)."""
+        if self._remote or self._nid is None:
+            return ""
+        try:
+            links = self._parent.store.get_note_links(self._nid)
+        except Exception:
+            return ""
+        if not links:
+            return ""
+        lines = ["_Linked automatically to related meetings and notes._", ""]
+        for l in links:
+            if l.get("kind") == "meeting":
+                rec = self._parent.store.get_meeting(l.get("id"))
+                kind = "Meeting"
+            else:
+                rec = self._parent.store.get_note(l.get("id"))
+                kind = "Note"
+            title = (rec.get("title") if rec else None) or f"{kind} #{l.get('id')}"
+            rel = (l.get("relation") or "related").replace("_", " ")
+            reason = f" — {l['reason']}" if l.get("reason") else ""
+            lines.append(f"- **{kind}:** {title}  _({rel})_{reason}")
+        return "\n".join(lines)
+
     def _full_markdown(self) -> str:
-        """The clean note: title + body + the extracted knowledge graph."""
+        """The clean note: title + body + knowledge graph + related items."""
         title = self._rec.get("title") or "Note"
         body = self._rec.get("body_md") or "_Empty note._"
         md = f"# {title}\n\n{body.strip()}\n"
         kg_md = self._kg_markdown()
         if kg_md:
             md += "\n---\n\n## Knowledge graph\n\n" + kg_md + "\n"
+        rel_md = self._related_markdown()
+        if rel_md:
+            md += "\n---\n\n## Related meetings & notes\n\n" + rel_md + "\n"
         return md
 
     def _render_view(self) -> None:
@@ -6002,6 +6277,126 @@ class SendDialog(QDialog):
             self.send_btn.setEnabled(True)
 
         win._run_async(work, done)
+
+
+def _force_graph_layout(node_keys: list, edges: list, width: int = 1100, height: int = 760,
+                        iters: int = 130) -> dict:
+    """A small Fruchterman-Reingold force-directed layout. Deterministic (nodes
+    seeded on a circle), so the same graph lays out the same way each refresh."""
+    import math
+
+    n = len(node_keys)
+    if not n:
+        return {}
+    pos = {}
+    for i, k in enumerate(node_keys):
+        ang = 2 * math.pi * i / n
+        pos[k] = [width / 2 + (width / 3) * math.cos(ang),
+                  height / 2 + (height / 3) * math.sin(ang)]
+    if n == 1:
+        return pos
+    k_dist = math.sqrt((width * height) / n) * 0.8
+    present = set(node_keys)
+    adj = [(a, b) for a, b in edges if a in present and b in present and a != b]
+    t = width / 10.0
+    for _ in range(iters):
+        disp = {k: [0.0, 0.0] for k in node_keys}
+        for i in range(n):
+            ki = node_keys[i]
+            xi, yi = pos[ki]
+            for j in range(i + 1, n):
+                kj = node_keys[j]
+                dx = xi - pos[kj][0]
+                dy = yi - pos[kj][1]
+                d = math.hypot(dx, dy) or 0.01
+                f = k_dist * k_dist / d
+                ux, uy = dx / d, dy / d
+                disp[ki][0] += ux * f; disp[ki][1] += uy * f
+                disp[kj][0] -= ux * f; disp[kj][1] -= uy * f
+        for a, b in adj:
+            dx = pos[a][0] - pos[b][0]
+            dy = pos[a][1] - pos[b][1]
+            d = math.hypot(dx, dy) or 0.01
+            f = d * d / k_dist
+            ux, uy = dx / d, dy / d
+            disp[a][0] -= ux * f; disp[a][1] -= uy * f
+            disp[b][0] += ux * f; disp[b][1] += uy * f
+        for k in node_keys:
+            dx, dy = disp[k]
+            d = math.hypot(dx, dy) or 0.01
+            pos[k][0] += dx / d * min(d, t)
+            pos[k][1] += dy / d * min(d, t)
+        t *= 0.95
+    return pos
+
+
+class _GraphCanvas(QGraphicsView):
+    """Renders the knowledge graph; scroll to zoom, drag to pan, double-click a
+    meeting/note node to open it."""
+
+    _COLORS = {"meeting": "#2563eb", "note": "#0d9488", "term": "#f59e0b", "team": "#7c3aed"}
+
+    def __init__(self, on_activate):
+        super().__init__()
+        self._on_activate = on_activate
+        self.setScene(QGraphicsScene(self))
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setStyleSheet(
+            "QGraphicsView{background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;}")
+
+    def wheelEvent(self, event) -> None:
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(factor, factor)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        item = self.itemAt(event.pos())
+        while item is not None and item.data(0) is None:
+            item = item.parentItem()
+        if item is not None and item.data(0) and item.data(1) is not None:
+            self._on_activate(item.data(0), item.data(1))
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def fit(self) -> None:
+        rect = self.scene().itemsBoundingRect()
+        if not rect.isNull():
+            self.fitInView(rect.adjusted(-50, -40, 50, 40), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_graph(self, nodes: dict, edges: list, pos: dict) -> None:
+        scene = self.scene()
+        scene.clear()
+        self.resetTransform()
+        edge_pen = QPen(QColor("#cbd5e1"))
+        edge_pen.setWidthF(1.2)
+        for a, b in edges:
+            if a in pos and b in pos:
+                line = scene.addLine(pos[a][0], pos[a][1], pos[b][0], pos[b][1], edge_pen)
+                line.setZValue(1)
+        for key, meta in nodes.items():
+            if key not in pos:
+                continue
+            x, y = pos[key]
+            kind = meta["kind"]
+            color = QColor(self._COLORS.get(kind, "#64748b"))
+            r = 17 if kind in ("meeting", "note") else (13 if kind == "team" else 9)
+            ell = scene.addEllipse(x - r, y - r, 2 * r, 2 * r, QPen(QColor("#ffffff"), 2), QBrush(color))
+            ell.setZValue(2)
+            ell.setData(0, kind)
+            ell.setData(1, meta.get("ref"))
+            ell.setToolTip(f"{kind}: {meta['label']}"
+                           + ("  (double-click to open)" if meta.get("ref") is not None else ""))
+            if kind != "term":  # label meetings/notes/teams; key terms show on hover
+                label = meta["label"]
+                txt = scene.addSimpleText(label if len(label) <= 42 else label[:40] + "…")
+                txt.setBrush(QColor("#1f2733"))
+                f = txt.font(); f.setPointSize(8); txt.setFont(f)
+                txt.setPos(x + r + 3, y - 7)
+                txt.setZValue(3)
+        rect = scene.itemsBoundingRect()
+        scene.setSceneRect(rect.adjusted(-60, -40, 60, 40))
+        self.fit()
 
 
 class WelcomeDialog(QDialog):

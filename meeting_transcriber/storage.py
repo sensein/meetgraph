@@ -110,6 +110,20 @@ class Store:
                 )
                 """
             )
+            # Links from a note to related meetings AND notes (auto-link agent).
+            # target_kind is 'meeting' | 'note' so the two id spaces never collide.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS note_links (
+                    note_id     INTEGER,
+                    target_kind TEXT,
+                    target_id   INTEGER,
+                    relation    TEXT,
+                    reason      TEXT,
+                    PRIMARY KEY (note_id, target_kind, target_id)
+                )
+                """
+            )
             # Background enrichment jobs for notes (key-term/topic extraction,
             # literature) - mirrors meeting_jobs so status shows and resumes.
             con.execute(
@@ -602,6 +616,27 @@ class Store:
         with self._connect() as con:
             con.execute("DELETE FROM notes WHERE id = ?", (note_id,))
             con.execute("DELETE FROM note_jobs WHERE note_id = ?", (note_id,))
+            con.execute("DELETE FROM note_links WHERE note_id = ?", (note_id,))
+
+    def set_note_links(self, note_id: int, links: list[dict]) -> None:
+        """Replace a note's links. links: {kind, id, relation, reason}."""
+        with self._connect() as con:
+            con.execute("DELETE FROM note_links WHERE note_id = ?", (note_id,))
+            con.executemany(
+                "INSERT OR REPLACE INTO note_links(note_id, target_kind, target_id, relation, reason) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(note_id, l.get("kind"), l.get("id"), l.get("relation"), l.get("reason"))
+                 for l in links if l.get("id") is not None],
+            )
+
+    def get_note_links(self, note_id: int) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT target_kind, target_id, relation, reason FROM note_links WHERE note_id = ?",
+                (note_id,),
+            ).fetchall()
+            return [{"kind": r["target_kind"], "id": r["target_id"],
+                     "relation": r["relation"], "reason": r["reason"]} for r in rows]
 
     def mark_note_job(self, note_id: int, stage: str, status: str) -> None:
         with self._connect() as con:

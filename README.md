@@ -18,6 +18,8 @@ and turns the conversation into structured, linked, shareable knowledge.
 - 🧾 **Model provenance** — records which transcription and notes models produced each result, in the notes and the knowledge graph; a banner shows the models + API-key status
 - 🔗 **Key terms auto-linked to Wikipedia + Wikidata** (verified, clickable)
 - 📝 **Personal & team notes** — write notes directly (no recording): they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
+- 🔗 **Auto-link notes** (opt-in) — an agent connects each saved note to the **relevant meeting summaries and notes** (shared topics/entities); links show under *Related*, feed the graph, and sync to your team
+- 🕸️ **Graph tab** — explore the whole knowledge graph visually (meetings · notes · shared key terms · teams · links); zoom/pan and **double-click a meeting or note to open and edit it** (edits sync)
 - 🧠 **Knowledge graph** — every meeting *and note* exported as RDF (JSON-LD / Turtle / N-Quads) conforming to the bundled **MCO** ontology, with PROV temporal data
 - 🕸️ **Automatic cross-meeting linking** — an agent connects related meetings (shared topics/entities, follow-ups, continuations)
 - 🔬 **PubMed** — for scientific discussions, links relevant publications (with a few key points each) and proposes **research gaps**
@@ -178,6 +180,14 @@ links, cited publications, and team membership.
 
 ---
 
+### Graph tab — explore & edit the knowledge graph
+
+The **🕸 Graph** tab draws the whole graph: **meetings**, **notes**, the **key terms** they
+share (shared terms link items together), **teams**, and the **links** between them (cross-meeting
+links, note auto-links, note→meeting "about", team membership). Scroll to **zoom**, drag to **pan**,
+**Fit** to recenter, and use **Show** to scope to Personal / All / a team. **Double-click a meeting
+or note** to open its editor — any edit there saves and **syncs** as usual, then the graph refreshes.
+
 ## 7. Notes (personal & team)
 
 The **📝 Notes** tab is for notes you write yourself — no recording involved. A note is
@@ -193,6 +203,11 @@ as RDF under the MCO ontology's new **`Note`** class.
   named graph (`…/meetgraph/notes`), so a full meeting re-sync never disturbs them.
 - **Link to a meeting:** set **About meeting** to connect a note to the meeting it concerns
   (a `dcterms:relation` edge to that meeting in the graph).
+- **Auto-link (opt-in):** tick **Auto-link new notes to related meetings & notes** on the Notes
+  tab. On save, an agent finds genuinely related meeting summaries and notes (shared
+  entities/topics), shows them under **Related meetings & notes**, writes the links into the
+  knowledge graph (`prov:wasInformedBy` / `skos:related` / `dcterms:relation`), and syncs them to
+  your team. Meeting and note ids are kept in separate spaces so they never collide.
 - **Write like a doc:** the note editor is WYSIWYG — **Ctrl+B**/**Ctrl+I** and a toolbar give
   bold, italic, headings, lists, quotes, code and links, and it's stored as Markdown. A
   **⟨⟩ Markdown** toggle lets you type raw Markdown that renders when you switch back.

@@ -38,6 +38,7 @@ class Digest:
     terms: list[str] = field(default_factory=list)
     term_qids: set[str] = field(default_factory=set)
     topic_tokens: set[str] = field(default_factory=set)
+    kind: str = "meeting"  # "meeting" | "note"
 
 
 def digest_of(meeting_id: int, title: str, summary: dict) -> Digest:
@@ -76,6 +77,28 @@ def digests_from_store(store, exclude_id: int | None = None, limit: int = 500) -
         except Exception:
             summary = {}
         out.append(digest_of(m.id, rec.get("title") or "", summary))
+    return out
+
+
+def digest_of_note(note_id: int, title: str, summary: dict) -> Digest:
+    d = digest_of(note_id, title, summary)
+    d.kind = "note"
+    return d
+
+
+def note_digests_from_store(store, exclude_id: int | None = None, limit: int = 500) -> list[Digest]:
+    out: list[Digest] = []
+    for n in store.list_notes(limit=limit):
+        if exclude_id is not None and n["id"] == exclude_id:
+            continue
+        rec = store.get_note(n["id"])
+        if not rec:
+            continue
+        try:
+            summary = json.loads(rec.get("summary_json") or "") if rec.get("summary_json") else {}
+        except Exception:
+            summary = {}
+        out.append(digest_of_note(n["id"], rec.get("title") or "", summary))
     return out
 
 
@@ -189,3 +212,80 @@ def cross_link(target: Digest, others: list[Digest], provider_cfg: dict | None =
     if not candidates:
         return []
     return agent_links(target, candidates, provider_cfg)
+
+
+# --------------------------------------------------------------------------- #
+# Note linking: a note -> related meetings AND notes (mixed candidate pool)
+# --------------------------------------------------------------------------- #
+def cross_link_note(target: Digest, others: list[Digest],
+                    provider_cfg: dict | None = None) -> list[dict]:
+    """Link a note to related meetings and notes. Returns dicts with an explicit
+    ``kind`` ('meeting'|'note') so meeting and note ids never collide.
+
+    Candidates are scored deterministically (shared entities/topics); an optional
+    LLM then confirms/labels them, choosing by candidate *index* (not raw id) to
+    keep the mixed pool unambiguous. Falls back to the deterministic links.
+    """
+    candidates = find_candidates(target, others)
+    if not candidates:
+        return []
+
+    def deterministic() -> list[dict]:
+        out: list[dict] = []
+        for c in candidates:
+            bits = []
+            if c.shared_terms:
+                bits.append("shares " + ", ".join(c.shared_terms[:3]))
+            if c.shared_topics:
+                bits.append("topic overlap: " + ", ".join(c.shared_topics[:3]))
+            out.append({"kind": c.digest.kind, "id": c.digest.id, "relation": "related",
+                        "reason": "; ".join(bits) or "related content"})
+        return out
+
+    if not provider_cfg or not provider_cfg.get("provider"):
+        return deterministic()
+    try:
+        from pydantic import BaseModel, Field
+        from pydantic_ai import Agent, PromptedOutput
+
+        from .agent import _build_model
+
+        class _L(BaseModel):
+            idx: int = Field(description="index of a related item from the candidate list")
+            relation: str = Field(description="one of: related, follow_up, continues, depends_on, supersedes")
+            reason: str = Field(description="one short sentence on why they are related")
+
+        class _LS(BaseModel):
+            links: list[_L] = Field(default_factory=list)
+
+        provider = provider_cfg["provider"]
+        model = _build_model(provider, provider_cfg.get("model") or None,
+                             provider_cfg.get("api_key") or None, provider_cfg.get("base_url") or None)
+        output_type = PromptedOutput(_LS) if provider in ("opensource", "openrouter") else _LS
+        agent = Agent(model, output_type=output_type, retries=2, system_prompt=(
+            "You connect a note to related meetings and notes. Only link genuinely related items "
+            "(same project/thread, a follow-up, a continuation, a dependency, or one that supersedes "
+            "another). Choose idx ONLY from the candidate list. Pick the most specific relation. Keep "
+            "reasons to one short sentence. If none truly relate, return an empty list — never invent."))
+
+        def fmt(i: int, d: Digest) -> str:
+            return f"idx={i} | kind={d.kind} | title={d.title!r} | topics={d.topics[:6]} | key_terms={d.terms[:8]}"
+
+        prompt = (
+            "Note:\n"
+            f"title={target.title!r} | topics={target.topics[:6]} | key_terms={target.terms[:8]}"
+            "\n\nCandidate meetings and notes:\n"
+            + "\n".join(fmt(i, c.digest) for i, c in enumerate(candidates))
+            + "\n\nReturn the genuine links."
+        )
+        result = agent.run_sync(prompt)
+        out: list[dict] = []
+        for l in result.output.links:
+            if 0 <= l.idx < len(candidates):
+                c = candidates[l.idx]
+                out.append({"kind": c.digest.kind, "id": c.digest.id,
+                            "relation": l.relation if l.relation in RELATIONS else "related",
+                            "reason": l.reason})
+        return out or deterministic()
+    except Exception:
+        return deterministic()
