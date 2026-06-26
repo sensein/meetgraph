@@ -178,6 +178,13 @@ class Store:
                 )
                 """
             )
+            # state: 'active' | 'left' | 'revoked'. access_until caps read-only
+            # access to the team's notes at the moment of leaving/revocation.
+            mcols = {r["name"] for r in con.execute("PRAGMA table_info(team_memberships)").fetchall()}
+            if "state" not in mcols:
+                con.execute("ALTER TABLE team_memberships ADD COLUMN state TEXT DEFAULT 'active'")
+            if "access_until" not in mcols:
+                con.execute("ALTER TABLE team_memberships ADD COLUMN access_until TEXT")
         self._migrate_settings()
         # Both DBs may hold secrets - keep them readable only by the owner.
         for p in (self.path, self.config_path):
@@ -310,28 +317,39 @@ class Store:
     def add_membership(self, team_id: str, team_name: str, key_id: str, key: str,
                        joined_at: str) -> None:
         with self._connect_config() as con:
+            # Re-joining reactivates and clears any prior access cap.
             con.execute(
-                "INSERT INTO team_memberships(team_id, team_name, key_id, key, joined_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(team_id) DO UPDATE SET "
-                "team_name=excluded.team_name, key_id=excluded.key_id, key=excluded.key",
+                "INSERT INTO team_memberships(team_id, team_name, key_id, key, joined_at, "
+                "state, access_until) VALUES (?, ?, ?, ?, ?, 'active', NULL) "
+                "ON CONFLICT(team_id) DO UPDATE SET team_name=excluded.team_name, "
+                "key_id=excluded.key_id, key=excluded.key, state='active', access_until=NULL",
                 (team_id, team_name, key_id, key, joined_at),
             )
+
+    _MEMBERSHIP_COLS = "team_id, team_name, key_id, key, joined_at, state, access_until"
 
     def list_memberships(self) -> list[dict]:
         with self._connect_config() as con:
             rows = con.execute(
-                "SELECT team_id, team_name, key_id, key, joined_at FROM team_memberships "
-                "ORDER BY joined_at"
+                f"SELECT {self._MEMBERSHIP_COLS} FROM team_memberships ORDER BY joined_at"
             ).fetchall()
             return [dict(r) for r in rows]
 
     def get_membership(self, team_id: str) -> dict | None:
         with self._connect_config() as con:
             row = con.execute(
-                "SELECT team_id, team_name, key_id, key, joined_at FROM team_memberships "
-                "WHERE team_id = ?", (team_id,)
+                f"SELECT {self._MEMBERSHIP_COLS} FROM team_memberships WHERE team_id = ?",
+                (team_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def set_membership_state(self, team_id: str, state: str, access_until: str | None) -> None:
+        """Mark a membership 'left'/'revoked' and cap read-only access at a time."""
+        with self._connect_config() as con:
+            con.execute(
+                "UPDATE team_memberships SET state = ?, access_until = ? WHERE team_id = ?",
+                (state, access_until, team_id),
+            )
 
     def remove_membership(self, team_id: str) -> None:
         with self._connect_config() as con:

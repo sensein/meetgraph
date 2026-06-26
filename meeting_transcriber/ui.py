@@ -519,9 +519,15 @@ class MainWindow(QWidget):
         self.scope_combo.addItem("Personal (this device)", ("personal", None))
         for m in memberships:
             name = m.get("team_name") or m.get("team_id")
-            ro = m.get("key_id") in revoked or (m.get("team_id") == self.team_id and self._team_readonly)
-            label = f"Team · {name}" + ("  (read-only)" if ro else "")
-            self.scope_combo.addItem(label, ("team", m.get("team_id")))
+            state = m.get("state") or "active"
+            until = (m.get("access_until") or "")[:10]
+            if state == "left":
+                suffix = f"  (left — read-only{(' to ' + until) if until else ''})"
+            elif state == "revoked" or m.get("key_id") in revoked:
+                suffix = f"  (revoked — read-only{(' to ' + until) if until else ''})"
+            else:
+                suffix = ""
+            self.scope_combo.addItem(f"Team · {name}{suffix}", ("team", m.get("team_id")))
         # Restore previous selection, else default to the active team if joined.
         idx = self.scope_combo.findData(prev) if prev else -1
         if idx < 0 and self.team_id:
@@ -558,6 +564,20 @@ class MainWindow(QWidget):
                        "source": ("local", None), "team_label": self._team_name(m.team_id)}
                       for m in local]
         local_gids = {self._gid(r["id"]) for r in local_rows}
+        # Read-only access to a team you've left/were revoked from is capped at the
+        # moment you left, so you only see notes that existed up to then.
+        cutoffs = {}
+        try:
+            cutoffs = {m["team_id"]: m.get("access_until") for m in self.store.list_memberships()}
+        except Exception:
+            pass
+
+        def within_cutoff(r, tid):
+            cut = cutoffs.get(tid)
+            if not cut:
+                return True
+            when = r.get("started_at") or r.get("created_at") or ""
+            return when <= cut
 
         def team_rows(tid):
             rows, note = self._fetch_team_meetings(query, tid)
@@ -569,6 +589,8 @@ class MainWindow(QWidget):
             for r in rows:
                 if r.get("id") in local_gids:
                     continue  # already shown as the local copy
+                if not within_cutoff(r, tid):
+                    continue  # after you left this team — not accessible
                 r = dict(r)
                 r["source"] = ("team", tid)
                 r["team_label"] = self._team_name(tid)
@@ -578,7 +600,9 @@ class MainWindow(QWidget):
         if kind == "personal":
             rows = local_rows
         elif kind == "team":
-            rows = [r for r in local_rows if r.get("team_id") == feed_team_id] + team_rows(feed_team_id)
+            rows = [r for r in local_rows
+                    if r.get("team_id") == feed_team_id and within_cutoff(r, feed_team_id)] \
+                + team_rows(feed_team_id)
         else:  # "all" — personal + every joined team
             rows = list(local_rows)
             try:
@@ -1321,6 +1345,18 @@ are stored locally in a protected config file.</p>
         hint.setWordWrap(True)
         hint.setStyleSheet(_HINT)
         outer.addWidget(hint)
+
+        self.team_keep_access = QCheckBox(
+            "Keep read-only access to a team's notes (up to when I leave/am removed)")
+        self.team_keep_access.setToolTip(
+            "On by default: leaving a team, or having your key revoked, keeps the team's meetings "
+            "viewable read-only up to that moment (via the Summary “Show” menu). Uncheck to lose "
+            "access entirely when you leave or are removed.")
+        self.team_keep_access.setChecked(not self._disable_access_on_leave())
+        self.team_keep_access.toggled.connect(
+            lambda on: self.store.set_setting("team.disable_access_on_leave", "0" if on else "1"))
+        outer.addWidget(self.team_keep_access)
+
         self._update_team_status()
         return box
 
@@ -2476,10 +2512,20 @@ are stored locally in a protected config file.</p>
     def _switch_team(self, team_id: str) -> None:
         """Make ``team_id`` the active team: re-apply its shared-DB config and
         recompute read-only status. Content of every joined team stays isolated
-        and accessible - switching just changes which one you're viewing/writing."""
+        and accessible - switching just changes which one you're viewing/writing.
+
+        A team you've left or been revoked from can't become active again here -
+        it's only viewable read-only, so we just point the Summary 'Show' menu at
+        it instead."""
         from . import team
         m = self.store.get_membership(team_id)
         if not m:
+            return
+        if (m.get("state") or "active") != "active":
+            if hasattr(self, "scope_combo"):
+                idx = self.scope_combo.findData(("team", team_id))
+                if idx >= 0:
+                    self.scope_combo.setCurrentIndex(idx)  # read-only view
             return
         try:
             parsed = team.parse_team_key(m.get("key") or "")
@@ -2491,6 +2537,7 @@ are stored locally in a protected config file.</p>
         self.store.set_setting("team.name", self.team_name)
         self._refresh_team_readonly()
         self._update_team_status()
+        self._populate_scope_combo()
         self._refresh_meetings()
 
     def _active_key_revoked(self) -> bool:
@@ -2525,8 +2572,11 @@ are stored locally in a protected config file.</p>
         actively in the team and won't write to its shared database."""
         self._team_readonly = False
         if self.team_id and self._active_key_revoked():
-            name = self.team_name or self.team_id
+            name, tid = self.team_name or self.team_id, self.team_id
             self._audit("team_key_revoked", None, name)
+            # Keep read-only access to notes up to now, unless the user opted to
+            # lose access on leaving/removal.
+            self._end_active_membership(tid, "revoked")
             self.team_id, self.team_name = "", ""
             self.store.set_setting("team.id", "")
             self.store.set_setting("team.name", "")
@@ -2540,13 +2590,28 @@ are stored locally in a protected config file.</p>
             self._persist_external()
             self._revoked_team_name = name  # surfaced once in the team status
 
+    def _disable_access_on_leave(self) -> bool:
+        return (self.store.get_setting("team.disable_access_on_leave") or "0") == "1"
+
+    def _end_active_membership(self, team_id: str, state: str) -> None:
+        """Stop being active in a team. By default keep read-only access to the
+        notes as they were at this moment; if the user disabled that, drop the
+        membership entirely (no further access)."""
+        if self._disable_access_on_leave():
+            self.store.remove_membership(team_id)
+        else:
+            self.store.set_membership_state(
+                team_id, state, datetime.now().isoformat(timespec="seconds"))
+
     def _leave_team(self) -> None:
         if not self.team_id:
             return
         self._audit("team_left", None, self.team_name)
-        self.store.remove_membership(self.team_id)
-        # Switch to another joined team if one remains; otherwise go team-less.
-        remaining = [m for m in self.store.list_memberships()]
+        tid = self.team_id
+        self._end_active_membership(tid, "left")
+        # Switch to another *active* team if one remains; otherwise go team-less.
+        remaining = [m for m in self.store.list_memberships()
+                     if m.get("team_id") != tid and (m.get("state") or "active") == "active"]
         if remaining:
             self._switch_team(remaining[0]["team_id"])
             return
@@ -2555,6 +2620,7 @@ are stored locally in a protected config file.</p>
         self.store.set_setting("team.name", "")
         self._team_readonly = False
         self._update_team_status()
+        self._populate_scope_combo()
         self._refresh_meetings()
 
     def _show_activity_log(self) -> None:
@@ -4222,10 +4288,16 @@ class TeamsDialog(QDialog):
         self.table.setRowCount(len(self._teams))
         for r, m in enumerate(self._teams):
             active = m.get("team_id") == self._win.team_id
-            is_ro = (m.get("key_id") in revoked) or (active and self._win._team_readonly)
-            status = "● Active" if active else ""
-            if is_ro:
-                status = (status + " · read-only").strip(" ·") or "read-only (revoked)"
+            state = m.get("state") or "active"
+            until = (m.get("access_until") or "")[:10]
+            if active:
+                status = "● Active"
+            elif state == "left":
+                status = f"Left — read-only{(' to ' + until) if until else ''}"
+            elif state == "revoked" or m.get("key_id") in revoked:
+                status = f"Revoked — read-only{(' to ' + until) if until else ''}"
+            else:
+                status = ""
             cells = [m.get("team_name") or m.get("team_id") or "",
                      (m.get("joined_at") or "")[:16].replace("T", " "), status]
             for c, val in enumerate(cells):
@@ -4241,17 +4313,17 @@ class TeamsDialog(QDialog):
             self.status.setText("Select a team first.")
             return
         name = m.get("team_name") or m["team_id"]
-        if m.get("key_id") in self._revoked_ids():
-            self.status.setText(f"“{name}” key is revoked — view it read-only from the Summary "
-                                "“Show” menu (can't be the active team).")
-            return
+        state = m.get("state") or "active"
+        inactive = state != "active" or m.get("key_id") in self._revoked_ids()
         self._win._switch_team(m["team_id"])
         self._reload()
         if self._win.team_id == m["team_id"]:
             self.status.setText(f"Switched to “{name}”.")
+        elif inactive:
+            word = "left" if state == "left" else "revoked"
+            self.status.setText(f"You {word} “{name}” — now showing it read-only in the Summary tab.")
         else:
-            self.status.setText(f"“{name}” key was revoked — staying in personal mode; "
-                                "view it read-only from the Summary “Show” menu.")
+            self.status.setText(f"Couldn't switch to “{name}”.")
 
     def _leave(self) -> None:
         m = self._selected()
@@ -4646,14 +4718,20 @@ def run() -> None:
     if dlg.user_email and not saved_email:
         store.set_setting("user_email", dlg.user_email)
 
-    # Leaving the team on the welcome screen clears the membership.
+    # Leaving the team on the welcome screen clears the active team. By default
+    # the membership is kept (read-only access to notes up to now); only dropped
+    # if the user disabled access-on-leave.
     left_team = ""
     if dlg.leave_team and current_team:
         prev_tid = (store.get_setting("team.id") or "").strip()
         store.set_setting("team.id", "")
         store.set_setting("team.name", "")
         if prev_tid:
-            store.remove_membership(prev_tid)
+            if (store.get_setting("team.disable_access_on_leave") or "0") == "1":
+                store.remove_membership(prev_tid)
+            else:
+                from datetime import datetime as _dt
+                store.set_membership_state(prev_tid, "left", _dt.now().isoformat(timespec="seconds"))
         left_team = current_team
 
     # Quick join: a team key pasted on the welcome screen applies the shared
