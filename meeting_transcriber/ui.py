@@ -1039,8 +1039,8 @@ class MainWindow(QWidget):
 
         intro = QLabel(
             "Your knowledge graph — meetings, notes, the key terms they share, teams, and the links "
-            "between them. Scroll to zoom, drag to pan, and double-click a meeting or note to open "
-            "and edit it (changes sync as usual).")
+            "between them. Scroll to zoom, drag the background to pan, and click a meeting or note "
+            "(blue/teal) to open and edit it (changes sync as usual).")
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#64748b; font-size:12px;")
         v.addWidget(intro)
@@ -1692,9 +1692,9 @@ bundled MCO ontology's <code>Note</code> class.</p>
 <h2>Graph</h2>
 <p>The <b>🕸 Graph</b> tab visualises your knowledge graph — meetings, notes, the key terms they
 share, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>Fit</b> to
-recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Double-click a meeting or note</b>
-to open and edit it — your changes save and sync, then the graph refreshes. Colours: blue = meeting,
-teal = note, amber = key term, purple = team.</p>
+recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Click a meeting or note</b>
+(blue/teal) to open and edit it — your changes save and sync, then the graph refreshes. Colours:
+blue = meeting, teal = note, amber = key term, purple = team.</p>
 
 <h2>Capturing meeting (system) audio</h2>
 <p>To transcribe the other participants, route system audio through a virtual
@@ -6331,16 +6331,19 @@ def _force_graph_layout(node_keys: list, edges: list, width: int = 1100, height:
 
 
 class _GraphCanvas(QGraphicsView):
-    """Renders the knowledge graph; scroll to zoom, drag to pan, double-click a
-    meeting/note node to open it."""
+    """Renders the knowledge graph; scroll to zoom, drag the background to pan,
+    click a meeting/note node to open it."""
 
     _COLORS = {"meeting": "#2563eb", "note": "#0d9488", "term": "#f59e0b", "team": "#7c3aed"}
 
     def __init__(self, on_activate):
         super().__init__()
         self._on_activate = on_activate
+        self._press_node = None
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Background drags pan the view; node clicks are handled below so they
+        # open the item instead of starting a pan.
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setStyleSheet(
@@ -6350,12 +6353,39 @@ class _GraphCanvas(QGraphicsView):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
 
-    def mouseDoubleClickEvent(self, event) -> None:
-        item = self.itemAt(event.pos())
+    def _node_at(self, view_pos):
+        """Return the openable node item under a viewport point, or None."""
+        item = self.itemAt(view_pos)
         while item is not None and item.data(0) is None:
             item = item.parentItem()
         if item is not None and item.data(0) and item.data(1) is not None:
-            self._on_activate(item.data(0), item.data(1))
+            return item
+        return None
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            node = self._node_at(event.position().toPoint())
+            if node is not None:
+                self._press_node = node      # open on release (so it reads as a click)
+                event.accept()
+                return
+        self._press_node = None
+        super().mousePressEvent(event)       # empty space -> pan
+
+    def mouseReleaseEvent(self, event) -> None:
+        node = self._press_node
+        if node is not None:
+            self._press_node = None
+            if self._node_at(event.position().toPoint()) is node:
+                self._on_activate(node.data(0), node.data(1))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        node = self._node_at(event.position().toPoint())
+        if node is not None:
+            self._on_activate(node.data(0), node.data(1))
             return
         super().mouseDoubleClickEvent(event)
 
@@ -6379,21 +6409,28 @@ class _GraphCanvas(QGraphicsView):
                 continue
             x, y = pos[key]
             kind = meta["kind"]
+            ref = meta.get("ref")
             color = QColor(self._COLORS.get(kind, "#64748b"))
             r = 17 if kind in ("meeting", "note") else (13 if kind == "team" else 9)
             ell = scene.addEllipse(x - r, y - r, 2 * r, 2 * r, QPen(QColor("#ffffff"), 2), QBrush(color))
             ell.setZValue(2)
             ell.setData(0, kind)
-            ell.setData(1, meta.get("ref"))
-            ell.setToolTip(f"{kind}: {meta['label']}"
-                           + ("  (double-click to open)" if meta.get("ref") is not None else ""))
+            ell.setData(1, ref)
+            openable = ref is not None
+            ell.setToolTip(f"{kind}: {meta['label']}" + ("  (click to open)" if openable else ""))
+            if openable:
+                ell.setCursor(Qt.CursorShape.PointingHandCursor)
             if kind != "term":  # label meetings/notes/teams; key terms show on hover
                 label = meta["label"]
+                # Label is a CHILD of the node so clicking the text opens it too.
                 txt = scene.addSimpleText(label if len(label) <= 42 else label[:40] + "…")
+                txt.setParentItem(ell)
                 txt.setBrush(QColor("#1f2733"))
                 f = txt.font(); f.setPointSize(8); txt.setFont(f)
                 txt.setPos(x + r + 3, y - 7)
                 txt.setZValue(3)
+                if openable:
+                    txt.setCursor(Qt.CursorShape.PointingHandCursor)
         rect = scene.itemsBoundingRect()
         scene.setSceneRect(rect.adjusted(-60, -40, 60, 40))
         self.fit()

@@ -184,9 +184,10 @@ links, cited publications, and team membership.
 
 The **🕸 Graph** tab draws the whole graph: **meetings**, **notes**, the **key terms** they
 share (shared terms link items together), **teams**, and the **links** between them (cross-meeting
-links, note auto-links, note→meeting "about", team membership). Scroll to **zoom**, drag to **pan**,
-**Fit** to recenter, and use **Show** to scope to Personal / All / a team. **Double-click a meeting
-or note** to open its editor — any edit there saves and **syncs** as usual, then the graph refreshes.
+links, note auto-links, note→meeting "about", team membership). Scroll to **zoom**, drag the
+background to **pan**, **Fit** to recenter, and use **Show** to scope to Personal / All / a team.
+**Click a meeting or note** (blue/teal) to open its editor — any edit there saves and **syncs** as
+usual, then the graph refreshes.
 
 ## 7. Notes (personal & team)
 
