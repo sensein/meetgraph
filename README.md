@@ -328,6 +328,44 @@ meeting_transcriber/
 
 In-app, see the **❓ Help** and **ℹ About** tabs.
  
+## Known Issue: Qt Platform Plugin Error on macOS
+
+When running `meetgraph` on macOS, you may encounter the following error:
+
+```bash
+qt.qpa.plugin: Could not find the Qt platform plugin "cocoa" in ""
+This application failed to start because no Qt platform plugin could be initialized.
+Reinstalling the application may fix this problem.
+
+zsh: abort      meetgraph
+```
+
+### Cause
+
+This issue can occur due to a Qt/PyQt plugin path conflict, especially when Anaconda is installed. In some cases, the application cannot locate the required macOS Qt platform plugin (`cocoa`).
+
+### Fix
+
+Set the `QT_QPA_PLATFORM_PLUGIN_PATH` environment variable to point to the PyQt6 platform plugins directory:
+
+```bash
+export QT_QPA_PLATFORM_PLUGIN_PATH="/opt/anaconda3/lib/python3.11/site-packages/PyQt6/Qt6/plugins/platforms"
+```
+
+Then run `meetgraph` again:
+
+```bash
+meetgraph
+```
+
+### Optional: Make the Fix Persistent
+
+To avoid setting the variable every time, add it to your shell configuration file:
+
+```bash
+echo 'export QT_QPA_PLATFORM_PLUGIN_PATH="/opt/anaconda3/lib/python3.11/site-packages/PyQt6/Qt6/plugins/platforms"' >> ~/.zshrc
+source ~/.zshrc
+```
 
 ## License
 
