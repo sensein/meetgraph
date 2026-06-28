@@ -1782,13 +1782,16 @@ bundled MCO ontology's <code>Note</code> class.</p>
       On save, an agent links the note to genuinely related meeting summaries and notes; they appear
       under <b>Related meetings &amp; notes</b>, are written into the graph, and sync to your team.</li>
   <li><b>Dictate by voice:</b> in <b>Edit</b> mode, click <b>🎤 Dictate</b> and speak — your mic is
-      transcribed (using the configured engine) and inserted into the note. Click again to stop.</li>
+      transcribed (using the configured engine) and inserted into the note. Say editing commands like
+      <b>“delete that”</b>, <b>“delete line”</b>, <b>“new line”</b>, <b>“period”</b>, or <b>“undo”</b>
+      to edit by voice, not just add. Click again to stop.</li>
 </ul>
 
 <h2>Annotations &amp; controlled vocabularies</h2>
-<p>Annotate any entity or sentence in a <b>meeting summary, transcript, or note</b> (W3C Web
-Annotation model). <b>Select the text</b>, then either press <b>⌘⇧A</b> (Ctrl+Shift+A),
-<b>right-click → Annotate selection</b>, or use the <b>✎ Annotate</b> button.</p>
+<p>Annotate any entity or sentence in a <b>meeting summary, transcript, or note</b> — in both the
+rendered <b>view</b> and while <b>editing</b> (W3C Web Annotation model). <b>Select the text</b>, then
+press <b>⌘⇧A</b> (Ctrl+Shift+A), <b>right-click → Annotate selection</b>, or use the <b>✎ Annotate</b>
+button.</p>
 <ul>
   <li><b>Tag &amp; align:</b> set a motivation (tag / comment / identify / link / describe), a label,
       and align the span to a built-in <b>MCO ontology</b> class <i>or</i> one of your own
@@ -1932,13 +1935,13 @@ literature.</p>
 
 <h2>Notes, annotations &amp; the graph</h2>
 <ul>
-  <li><b>📝 Notes</b> — write notes directly (or <b>dictate by voice</b>); they're AI-enriched into
-      the same knowledge graph as meetings, can be personal or shared to a team, and can link to a
-      meeting and to related notes.</li>
-  <li><b>✎ Annotations</b> — select any entity or sentence in a meeting or note and annotate it
-      (Web Annotation model): tag it, <b>align it to an ontology class or your own controlled
-      vocabulary</b>, and <b>manually link to Wikipedia / Wikidata / DOI / any URI</b>. Select then
-      press <b>⌘⇧A</b> or right-click → Annotate.</li>
+  <li><b>📝 Notes</b> — write notes directly or <b>dictate by voice</b> (with spoken commands like
+      “delete that”, “new line”, “period”); they're AI-enriched into the same knowledge graph as
+      meetings, can be personal or shared to a team, and can link to a meeting and to related notes.</li>
+  <li><b>✎ Annotations</b> — select any entity or sentence in a meeting or note — in the view or
+      while editing — and annotate it (Web Annotation model): tag it, <b>align it to an ontology
+      class or your own controlled vocabulary</b>, and <b>manually link to Wikipedia / Wikidata /
+      DOI / any URI</b>. Select then press <b>⌘⇧A</b> or right-click → Annotate.</li>
   <li><b>🏷️ Controlled vocabularies</b> — define your own SKOS term lists when the built-in
       ontology is too limited; terms get stable URIs and sync to your team.</li>
   <li><b>🕸 Graph</b> — explore meetings, notes, shared key terms, annotations and teams visually;
@@ -4923,6 +4926,8 @@ class MeetingDetailDialog(QDialog):
         self._editor = QTextEdit()
         self._editor.setObjectName("transcript")
         self._editor.setFont(QFont("Menlo", 12))
+        self._editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._editor.customContextMenuRequested.connect(self._view_context_menu)
         self._editor.hide()
         v.addWidget(self._editor, 1)
         self._update_view()
@@ -5125,10 +5130,14 @@ class MeetingDetailDialog(QDialog):
             n = 0
         self._anns_btn.setText(f"Annotations ({n})" if n else "Annotations")
 
+    def _annotate_source(self):
+        """The active text surface — the editor while editing, else the rendered view."""
+        return self._editor if self._editing else self._view
+
     def _annotate(self) -> None:
         if self._remote or self._mid is None:
             return
-        exact = (self._view.textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
+        exact = (self._annotate_source().textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
         if not exact:
             QMessageBox.information(self, "Select text first",
                                    "Select some text in the summary or transcript above, then click Annotate.")
@@ -5143,13 +5152,14 @@ class MeetingDetailDialog(QDialog):
         self._refresh_anno_count()
 
     def _view_context_menu(self, pos) -> None:
-        menu = self._view.createStandardContextMenu()
+        w = self.sender() or self._view
+        menu = w.createStandardContextMenu()
         menu.addSeparator()
         act = menu.addAction("✎ Annotate selection  (⌘⇧A)")
         act.setEnabled(not self._remote and self._mid is not None
-                       and bool((self._view.textCursor().selectedText() or "").strip()))
+                       and bool((w.textCursor().selectedText() or "").strip()))
         act.triggered.connect(self._annotate)
-        menu.exec(self._view.mapToGlobal(pos))
+        menu.exec(w.mapToGlobal(pos))
 
     def _export(self) -> str | None:
         scope = self._scope()
@@ -5384,6 +5394,53 @@ class MarkdownEditor(QWidget):
         cur.insertText(sep + text)
         self.editor.setTextCursor(cur)
 
+    def apply_voice(self, text: str) -> bool:
+        """Handle a spoken editing command (delete / new line / undo / punctuation).
+
+        Returns True if ``text`` was a command and was applied; False otherwise
+        (so the caller dictates it as literal text)."""
+        Op = QTextCursor.MoveOperation
+        Sel = QTextCursor.SelectionType
+        cmd = (text or "").strip().lower().rstrip(".!?,")
+        ed = self.editor
+        cur = ed.textCursor()
+        if cmd in ("delete that", "scratch that", "delete last word", "delete word", "delete"):
+            cur.movePosition(Op.End)
+            cur.movePosition(Op.PreviousWord, QTextCursor.MoveMode.KeepAnchor)
+            cur.removeSelectedText()
+            # tidy a trailing space left before the removed word
+            cur.movePosition(Op.End)
+            ed.setTextCursor(cur)
+            return True
+        if cmd in ("delete line", "delete that line", "delete this line", "delete the line"):
+            cur.movePosition(Op.End)
+            cur.select(Sel.BlockUnderCursor)
+            cur.removeSelectedText()
+            ed.setTextCursor(cur)
+            return True
+        if cmd in ("new line", "newline", "line break"):
+            cur.movePosition(Op.End); cur.insertText("\n"); ed.setTextCursor(cur)
+            return True
+        if cmd in ("new paragraph", "paragraph break"):
+            cur.movePosition(Op.End); cur.insertText("\n\n"); ed.setTextCursor(cur)
+            return True
+        if cmd in ("undo", "undo that"):
+            ed.undo(); return True
+        if cmd in ("redo",):
+            ed.redo(); return True
+        if cmd in ("clear note", "delete everything", "delete all", "clear all"):
+            ed.selectAll(); ed.textCursor().removeSelectedText()
+            cur2 = ed.textCursor(); cur2.removeSelectedText(); ed.setTextCursor(cur2)
+            return True
+        # spoken punctuation -> symbol appended without a leading space
+        punct = {"period": ".", "full stop": ".", "comma": ",", "question mark": "?",
+                 "exclamation mark": "!", "exclamation point": "!", "colon": ":",
+                 "semicolon": ";", "dash": " — "}
+        if cmd in punct:
+            cur.movePosition(Op.End); cur.insertText(punct[cmd]); ed.setTextCursor(cur)
+            return True
+        return False
+
     # --- source toggle ---
     def _toggle_source(self) -> None:
         if not self._source:  # rich -> raw markdown source
@@ -5580,6 +5637,9 @@ class NoteEditorDialog(QDialog):
         # --- rich editor (edit mode) ---
         self._editor = MarkdownEditor()
         self._editor.set_markdown(self._rec.get("body_md") or "")
+        # Annotate from the editor too (select text → right-click / ⌘⇧A).
+        self._editor.editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._editor.editor.customContextMenuRequested.connect(self._view_context_menu)
         v.addWidget(self._editor, 3)
 
         self.status = QLabel("")
@@ -5705,8 +5765,8 @@ class NoteEditorDialog(QDialog):
         self._btn_dictate.setVisible(editing and not self._remote)        # voice input while editing
         if not editing:
             self._stop_dictation()
-        self._btn_annotate.setVisible(not editing and not self._remote)   # annotate the rendered note
-        self._btn_anns.setVisible(not editing)
+        self._btn_annotate.setVisible(not self._remote)   # annotate in view AND edit mode
+        self._btn_anns.setVisible(True)
         self._refresh_anno_count()
         self._btn_delete.setVisible(not self._remote)
         self._update_subtitle()
@@ -5723,14 +5783,18 @@ class NoteEditorDialog(QDialog):
             n = 0
         self._btn_anns.setText(f"Annotations ({n})" if n else "Annotations")
 
+    def _annotate_source(self):
+        """The active text surface \u2014 the rich editor while editing, else the view."""
+        return self._editor.editor if self._editing else self._view
+
     def _annotate(self) -> None:
         if self._remote or self._nid is None:
             QMessageBox.information(self, "Save first", "Save the note before annotating it.")
             return
-        exact = (self._view.textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
+        exact = (self._annotate_source().textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
         if not exact:
             QMessageBox.information(self, "Select text first",
-                                   "Select some text in the note above, then click Annotate.")
+                                   "Select some text in the note (view or editor), then Annotate.")
             return
         dlg = AnnotationDialog(self._parent, "note", self._nid, "body", exact)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -5744,13 +5808,14 @@ class NoteEditorDialog(QDialog):
         self._refresh_anno_count()
 
     def _view_context_menu(self, pos) -> None:
-        menu = self._view.createStandardContextMenu()
+        w = self.sender() or self._view
+        menu = w.createStandardContextMenu()
         menu.addSeparator()
         act = menu.addAction("✎ Annotate selection  (⌘⇧A)")
         act.setEnabled(not self._remote and self._nid is not None
-                       and bool((self._view.textCursor().selectedText() or "").strip()))
+                       and bool((w.textCursor().selectedText() or "").strip()))
         act.triggered.connect(self._annotate)
-        menu.exec(self._view.mapToGlobal(pos))
+        menu.exec(w.mapToGlobal(pos))
 
     # ----- voice dictation -----
     def _toggle_dictate(self) -> None:
@@ -5785,10 +5850,15 @@ class NoteEditorDialog(QDialog):
             self._btn_dictate.setChecked(False)
             return
         self._btn_dictate.setText("⏹ Stop dictation")
-        self.status.setText("🎤 Listening… speak; your words are inserted into the note.")
+        self.status.setText("🎤 Listening… speak to insert text. Say “delete that”, “delete line”, "
+                            "“new line”, “period”, or “undo” to edit by voice.")
 
     def _on_dictated(self, _speaker, _ts, text: str) -> None:
-        if text and text.strip():
+        if not text or not text.strip():
+            return
+        # Spoken editing commands ("delete that", "new line", "period", …) act on
+        # the text; everything else is inserted verbatim.
+        if not self._editor.apply_voice(text):
             self._editor.append_text(text.strip())
 
     def _stop_dictation(self) -> None:

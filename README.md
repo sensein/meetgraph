@@ -17,8 +17,8 @@ and turns the conversation into structured, linked, shareable knowledge. Additio
 - 🤖 **AI meeting notes** — a provider-agnostic Pydantic AI agent (Claude / OpenAI / OpenRouter / local Ollama) produces faithful notes (topics · decisions · open questions · action items), **fixes obvious transcription errors**, and is **editable** (with who-edited tracking)
 - 🧾 **Model provenance** — records which transcription and notes models produced each result, in the notes and the knowledge graph; a banner shows the models + API-key status
 - 🔗 **Key terms auto-linked to Wikipedia + Wikidata** (verified, clickable)
-- 📝 **Personal & team notes** — write notes directly (no recording) or **dictate them by voice**; they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
-- ✎ **Annotations** — select any entity or sentence in a **meeting summary, transcript, or note** and annotate it (W3C Web Annotation model): tag it, **align to an ontology class or your own controlled vocabulary**, and **manually link to external resources** (Wikipedia, Wikidata, DOI, any URI); annotations sync and export as RDF
+- 📝 **Personal & team notes** — write notes directly (no recording) or **dictate them by voice** (with spoken edit commands like *“delete that”*, *“new line”*, *“period”*); they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
+- ✎ **Annotations** — select any entity or sentence in a **meeting summary, transcript, or note** (in the rendered view *or* while editing) and annotate it (W3C Web Annotation model): tag it, **align to an ontology class or your own controlled vocabulary**, and **manually link to external resources** (Wikipedia, Wikidata, DOI, any URI); annotations sync and export as RDF
 - 🏷️ **Controlled vocabularies** — when the built-in ontology is too limited, define your own **SKOS** term lists and align annotations to them; terms get stable URIs and sync to your team
 - 🔗 **Auto-link notes** (opt-in) — an agent connects each saved note to the **relevant meeting summaries and notes** (shared topics/entities); links show under *Related*, feed the graph, and sync to your team
 - 🕸️ **Graph tab** — explore the whole knowledge graph visually (meetings · notes · shared key terms · teams · links); zoom/pan and **double-click a meeting or note to open and edit it** (edits sync)
@@ -202,9 +202,9 @@ links, cited publications, and team membership.
 
 ### Annotations & controlled vocabularies
 
-Annotate any **entity or sentence** in a meeting summary, transcript, or note — modeled on the
-**W3C Web Annotation** vocabulary (`oa:`). Select the text, then press **⌘⇧A** (Ctrl+Shift+A),
-**right-click → Annotate selection**, or click **✎ Annotate**:
+Annotate any **entity or sentence** in a meeting summary, transcript, or note — **in the rendered
+view or while editing** — modeled on the **W3C Web Annotation** vocabulary (`oa:`). Select the text,
+then press **⌘⇧A** (Ctrl+Shift+A), **right-click → Annotate selection**, or click **✎ Annotate**:
 
 - **Tag & align** — set a motivation (tag / comment / identify / link / describe), a label, and
   align the span to a built-in **MCO ontology** class *or* one of your own controlled-vocabulary
