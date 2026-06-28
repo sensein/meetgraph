@@ -181,6 +181,12 @@ _NOTE_COLS = [
     "author_name", "author_email", "summary_json", "created_at", "updated_at",
 ]
 
+_ANNO_COLS = [
+    "id", "target_kind", "target_id", "field", "exact", "motivation", "entity_label",
+    "comment", "aligned_uri", "aligned_label", "links", "author_name", "author_email",
+    "created_at", "updated_at",
+]
+
 
 class RelationalSink:
     def __init__(self, url: str, user: str = "", password: str = ""):
@@ -292,6 +298,29 @@ class RelationalSink:
                 Column("note_id", BigInteger, index=True),
                 Column("target_kind", Text), Column("target_id", BigInteger),
                 Column("relation", Text), Column("reason", Text),
+            ),
+            "annotations": Table(
+                "meetgraph_annotations", self._meta,
+                Column("id", BigInteger, primary_key=True),
+                Column("target_kind", Text, index=True), Column("target_id", BigInteger, index=True),
+                Column("field", Text), Column("exact", Text),
+                Column("motivation", Text), Column("entity_label", Text), Column("comment", Text),
+                Column("aligned_uri", Text), Column("aligned_label", Text), Column("links", Text),
+                Column("author_name", Text), Column("author_email", Text),
+                Column("created_at", Text), Column("updated_at", Text),
+            ),
+            "vocabularies": Table(
+                "meetgraph_vocabularies", self._meta,
+                Column("id", BigInteger, primary_key=True),
+                Column("name", Text), Column("namespace", Text), Column("description", Text),
+                Column("created_at", Text),
+            ),
+            "vocab_terms": Table(
+                "meetgraph_vocab_terms", self._meta,
+                Column("id", BigInteger, primary_key=True),
+                Column("vocab_id", BigInteger, index=True),
+                Column("label", Text), Column("uri", Text), Column("description", Text),
+                Column("created_at", Text),
             ),
         }
         self._meta.create_all(self._engine)
@@ -406,6 +435,48 @@ class RelationalSink:
             for name in ("note_key_terms", "note_topics", "note_links"):
                 conn.execute(delete(t[name]).where(t[name].c.note_id == note_id))
             conn.execute(delete(t["notes"]).where(t["notes"].c.id == note_id))
+
+    def upsert_annotation(self, rec: dict) -> None:
+        from sqlalchemy import delete, insert
+
+        row = {c: rec.get(c) for c in _ANNO_COLS}
+        t = self._t["annotations"]
+        with self._engine.begin() as conn:
+            conn.execute(delete(t).where(t.c.id == rec.get("id")))
+            conn.execute(insert(t).values(**row))
+
+    def delete_annotation(self, annotation_id) -> None:
+        from sqlalchemy import delete
+
+        t = self._t["annotations"]
+        with self._engine.begin() as conn:
+            conn.execute(delete(t).where(t.c.id == annotation_id))
+
+    def list_annotations(self, limit: int = 5000) -> list[dict]:
+        from sqlalchemy import select
+
+        t = self._t["annotations"]
+        with self._engine.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                select(t).order_by(t.c.id.desc()).limit(limit)).mappings().all()]
+
+    def upsert_vocabulary(self, vocab: dict, terms: list[dict]) -> None:
+        from sqlalchemy import delete, insert
+
+        vid = vocab.get("id")
+        vrow = {c: vocab.get(c) for c in ("id", "name", "namespace", "description", "created_at")}
+        term_rows = [
+            {"id": t.get("id"), "vocab_id": vid, "label": t.get("label"),
+             "uri": t.get("uri"), "description": t.get("description"), "created_at": t.get("created_at")}
+            for t in (terms or [])
+        ]
+        v, vt = self._t["vocabularies"], self._t["vocab_terms"]
+        with self._engine.begin() as conn:
+            conn.execute(delete(vt).where(vt.c.vocab_id == vid))
+            conn.execute(delete(v).where(v.c.id == vid))
+            conn.execute(insert(v).values(**vrow))
+            if term_rows:
+                conn.execute(insert(vt), term_rows)
 
     def list_notes(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
         """List notes in the shared DB (optionally for one team), newest first."""
@@ -566,6 +637,20 @@ class MongoSink:
     def delete_note(self, note_id) -> None:
         self._db.notes.delete_one({"_id": note_id})
 
+    def upsert_annotation(self, rec: dict) -> None:
+        doc = {c: rec.get(c) for c in _ANNO_COLS}
+        doc["_id"] = rec.get("id")
+        self._db.annotations.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+
+    def delete_annotation(self, annotation_id) -> None:
+        self._db.annotations.delete_one({"_id": annotation_id})
+
+    def upsert_vocabulary(self, vocab: dict, terms: list[dict]) -> None:
+        doc = {k: vocab.get(k) for k in ("id", "name", "namespace", "description", "created_at")}
+        doc["_id"] = vocab.get("id")
+        doc["terms"] = terms or []
+        self._db.vocabularies.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+
     def list_notes(self, team_id: str | None = None, limit: int = 1000) -> list[dict]:
         q = {"team_id": team_id} if team_id else {}
         cur = self._db.notes.find(
@@ -630,6 +715,11 @@ class GraphSink:
         full meeting re-sync (CLEAR + INSERT) never wipes the team's notes."""
         return self.named_graph.rstrip("/") + "/notes"
 
+    @property
+    def annotations_named_graph(self) -> str:
+        """Annotations + controlled vocabularies share their own named graph."""
+        return self.named_graph.rstrip("/") + "/annotations"
+
     def _gsp_url(self, ng: str | None = None) -> str:
         graph = ng or self.named_graph
         sep = "&" if "?" in self.cfg.graph_store_url else "?"
@@ -671,6 +761,53 @@ class GraphSink:
             self._request(self.cfg.update_url, upd.encode("utf-8"),
                           "application/sparql-update", "POST")
         # Graph Store Protocol can't delete a sub-resource set cleanly; needs Update.
+
+    def push_annotation(self, rec: dict) -> None:
+        """Upsert one annotation into the shared annotations named graph."""
+        ng = self.annotations_named_graph
+        a_iri = kg.annotation_iri(rec.get("id"))
+        triples = kg.serialize_annotation(rec, fmt="nt").decode("utf-8")
+        if self.cfg.update_url:
+            update = (
+                f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                f'FILTER(?s = <{a_iri}> || STRSTARTS(STR(?s), "{a_iri}/")) }} }} ;\n'
+                f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}"
+            )
+            self._request(self.cfg.update_url, update.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            self._request(self._gsp_url(ng), triples.encode("utf-8"),
+                          "application/n-triples", "POST")
+        else:
+            raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
+
+    def delete_annotation(self, annotation_id) -> None:
+        ng = self.annotations_named_graph
+        a = kg.annotation_iri(annotation_id)
+        if self.cfg.update_url:
+            upd = (f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                   f'FILTER(?s = <{a}> || STRSTARTS(STR(?s), "{a}/")) }} }}')
+            self._request(self.cfg.update_url, upd.encode("utf-8"),
+                          "application/sparql-update", "POST")
+
+    def push_vocabulary(self, vocab: dict, terms: list[dict]) -> None:
+        """Upsert a controlled vocabulary (SKOS ConceptScheme + Concepts)."""
+        ng = self.annotations_named_graph
+        scheme_iri = kg.vocab_iri(vocab.get("id"))
+        triples = kg.serialize_vocabulary(vocab, terms, fmt="nt").decode("utf-8")
+        if self.cfg.update_url:
+            update = (
+                f"DELETE {{ GRAPH <{ng}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{ng}> {{ ?s ?p ?o . "
+                f'FILTER(?s = <{scheme_iri}> || STRSTARTS(STR(?s), "{scheme_iri}/")) }} }} ;\n'
+                f"INSERT DATA {{ GRAPH <{ng}> {{\n{triples}\n}} }}"
+            )
+            self._request(self.cfg.update_url, update.encode("utf-8"),
+                          "application/sparql-update", "POST")
+        elif self.cfg.graph_store_url:
+            self._request(self._gsp_url(ng), triples.encode("utf-8"),
+                          "application/n-triples", "POST")
+        else:
+            raise RuntimeError("Configure a Graph Store or Update URL to push RDF.")
 
     def push_note(self, rec: dict, summary: dict | None = None) -> None:
         """Upsert one note into the shared notes named graph."""
@@ -1048,6 +1185,59 @@ def delete_remote(meeting_id, cfg: ExternalConfig) -> dict[str, str]:
     if cfg.graph.enabled and (cfg.graph.update_url or cfg.graph.graph_store_url):
         try:
             GraphSink(cfg.graph).delete_meeting(meeting_id)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
+def push_annotation(rec: dict, cfg: ExternalConfig) -> dict[str, str]:
+    """Push one annotation to every enabled sink (relational + graph)."""
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).upsert_annotation(rec)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    if cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
+        try:
+            GraphSink(cfg.graph).push_annotation(rec)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
+def delete_annotation_remote(annotation_id, cfg: ExternalConfig) -> dict[str, str]:
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).delete_annotation(annotation_id)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    if cfg.graph.enabled and (cfg.graph.update_url or cfg.graph.graph_store_url):
+        try:
+            GraphSink(cfg.graph).delete_annotation(annotation_id)
+            results["graph"] = "ok"
+        except Exception as exc:
+            results["graph"] = f"{type(exc).__name__}: {exc}"
+    return results
+
+
+def push_vocabulary(vocab: dict, terms: list[dict], cfg: ExternalConfig) -> dict[str, str]:
+    """Push a controlled vocabulary (relational rows + SKOS graph)."""
+    results: dict[str, str] = {}
+    if cfg.relational.enabled and cfg.relational.url:
+        try:
+            structured_sink(cfg.relational).upsert_vocabulary(vocab, terms)
+            results["relational"] = "ok"
+        except Exception as exc:
+            results["relational"] = f"{type(exc).__name__}: {exc}"
+    if cfg.graph.enabled and (cfg.graph.graph_store_url or cfg.graph.update_url):
+        try:
+            GraphSink(cfg.graph).push_vocabulary(vocab, terms)
             results["graph"] = "ok"
         except Exception as exc:
             results["graph"] = f"{type(exc).__name__}: {exc}"

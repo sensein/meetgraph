@@ -44,6 +44,7 @@ prefixes:
   foaf: http://xmlns.com/foaf/0.1/
   ical: http://www.w3.org/2002/12/cal/ical#
   sioc: http://rdfs.org/sioc/ns#
+  oa: http://www.w3.org/ns/oa#
 
 default_prefix: mco
 default_range: string
@@ -207,6 +208,34 @@ classes:
       - references
       - research_gap
       - part_of_team
+
+  Annotation:
+    is_a: NamedThing
+    description: >-
+      A user-made annotation on a span of a meeting summary, transcript, or note —
+      aligned to the W3C Web Annotation model (`oa:Annotation`). The annotated text
+      is captured as `exact_quote`; `annotation_target` points at the meeting/note
+      it belongs to. The annotation carries a `motivation` (tagging an entity,
+      commenting, identifying, linking, describing), an optional `entity_label` and
+      a `comment`, an optional alignment to an ontology class/concept
+      (`aligned_concept`), and one or more manual `external_link`s to external
+      knowledge bases (Wikipedia, Wikidata, DOI, or any URI). Unlike the automatic
+      key-term linking, annotations are created and linked by hand.
+    broad_mappings:
+      - oa:Annotation
+    close_mappings:
+      - oa:Annotation
+    slots:
+      - annotation_target
+      - exact_quote
+      - motivation
+      - entity_label
+      - comment
+      - aligned_concept
+      - external_link
+      - author
+      - created
+      - modified
 
   Publication:
     is_a: NamedThing
@@ -407,6 +436,44 @@ slots:
     range: Meeting
     description: A meeting this note is about / concerns, if any.
 
+  # --- Annotation (Web Annotation / oa) ---
+  annotation_target:
+    slot_uri: oa:hasTarget
+    exact_mappings: [oa:hasTarget]
+    range: NamedThing
+    description: The meeting or note (and span) this annotation is on.
+  exact_quote:
+    slot_uri: oa:exact
+    exact_mappings: [oa:exact]
+    close_mappings: [schema:text]
+    description: The exact text that was selected and annotated.
+  motivation:
+    slot_uri: oa:motivatedBy
+    exact_mappings: [oa:motivatedBy]
+    range: Motivation
+    description: Why the annotation was made (tag/comment/identify/link/describe).
+  entity_label:
+    slot_uri: rdfs:label
+    close_mappings: [skos:prefLabel]
+    description: A short label/type for the annotated entity, if tagging one.
+  comment:
+    slot_uri: oa:bodyValue
+    exact_mappings: [oa:bodyValue]
+    close_mappings: [rdfs:comment]
+    description: A free-text comment the annotator wrote.
+  aligned_concept:
+    slot_uri: dcterms:subject
+    close_mappings: [oa:hasBody, skos:exactMatch]
+    range: uriorcurie
+    description: An ontology class/concept the annotated span is aligned to.
+  external_link:
+    slot_uri: rdfs:seeAlso
+    exact_mappings: [rdfs:seeAlso]
+    close_mappings: [oa:hasBody, owl:sameAs]
+    range: uri
+    multivalued: true
+    description: Manually-added link(s) to external knowledge bases (Wikipedia, Wikidata, DOI, any URI).
+
   # --- Topic ---
   pref_label:
     slot_uri: skos:prefLabel
@@ -542,6 +609,15 @@ slots:
 # Enums
 # ---------------------------------------------------------------------------
 enums:
+
+  Motivation:
+    description: Why an annotation was made, aligned to oa motivations.
+    permissible_values:
+      tagging: { description: "Tag the span as an entity/term.", meaning: oa:tagging }
+      commenting: { description: "Comment on the span.", meaning: oa:commenting }
+      identifying: { description: "Identify what the span refers to.", meaning: oa:identifying }
+      linking: { description: "Link the span to an external resource.", meaning: oa:linking }
+      describing: { description: "Describe the span.", meaning: oa:describing }
 
   DecisionStatus:
     description: Lifecycle state of a decision.

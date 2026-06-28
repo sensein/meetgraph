@@ -17,7 +17,9 @@ and turns the conversation into structured, linked, shareable knowledge. Additio
 - 🤖 **AI meeting notes** — a provider-agnostic Pydantic AI agent (Claude / OpenAI / OpenRouter / local Ollama) produces faithful notes (topics · decisions · open questions · action items), **fixes obvious transcription errors**, and is **editable** (with who-edited tracking)
 - 🧾 **Model provenance** — records which transcription and notes models produced each result, in the notes and the knowledge graph; a banner shows the models + API-key status
 - 🔗 **Key terms auto-linked to Wikipedia + Wikidata** (verified, clickable)
-- 📝 **Personal & team notes** — write notes directly (no recording): they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
+- 📝 **Personal & team notes** — write notes directly (no recording) or **dictate them by voice**; they get the **same knowledge graph** as meetings (key terms auto-linked to Wikipedia/Wikidata, optional PubMed), can be kept **personal** or **shared to a team**, and can link to the meeting they're about
+- ✎ **Annotations** — select any entity or sentence in a **meeting summary, transcript, or note** and annotate it (W3C Web Annotation model): tag it, **align to an ontology class or your own controlled vocabulary**, and **manually link to external resources** (Wikipedia, Wikidata, DOI, any URI); annotations sync and export as RDF
+- 🏷️ **Controlled vocabularies** — when the built-in ontology is too limited, define your own **SKOS** term lists and align annotations to them; terms get stable URIs and sync to your team
 - 🔗 **Auto-link notes** (opt-in) — an agent connects each saved note to the **relevant meeting summaries and notes** (shared topics/entities); links show under *Related*, feed the graph, and sync to your team
 - 🕸️ **Graph tab** — explore the whole knowledge graph visually (meetings · notes · shared key terms · teams · links); zoom/pan and **double-click a meeting or note to open and edit it** (edits sync)
 - 🧠 **Knowledge graph** — every meeting *and note* exported as RDF (JSON-LD / Turtle / N-Quads) conforming to the bundled **MCO** ontology, with PROV temporal data
@@ -198,15 +200,33 @@ links, cited publications, and team membership.
 
 ---
 
+### Annotations & controlled vocabularies
+
+Annotate any **entity or sentence** in a meeting summary, transcript, or note — modeled on the
+**W3C Web Annotation** vocabulary (`oa:`). Select the text, then press **⌘⇧A** (Ctrl+Shift+A),
+**right-click → Annotate selection**, or click **✎ Annotate**:
+
+- **Tag & align** — set a motivation (tag / comment / identify / link / describe), a label, and
+  align the span to a built-in **MCO ontology** class *or* one of your own controlled-vocabulary
+  terms.
+- **Manual external links** — add **Wikipedia / Wikidata / DOI / any URI** by hand (one per line,
+  `Label | URL`), or **🔎 Look up** to fetch verified Wikipedia/Wikidata links.
+- **Controlled vocabularies** — when the built-in ontology is too limited, open **Manage vocab…**
+  to define your own **SKOS** concept schemes; terms get stable URIs, appear in the aligner, and
+  sync to your team.
+
+Annotations and vocabularies are saved, **synced** (relational + a dedicated `…/annotations` graph),
+exported as RDF, and shown as nodes in the Graph tab.
+
 ### Graph tab — explore & edit the knowledge graph
 
 The **🕸 Graph** tab draws the whole graph: **meetings**, **notes**, the **key terms** they
-share (shared terms link items together), **teams**, and the **links** between them (cross-meeting
-links, note auto-links, note→meeting "about", team membership). Scroll to **zoom**, drag the
-background to **pan**, **Fit** to recenter, and use **Show** to scope to Personal / All / a team.
-**Click a meeting or note** (blue/teal) to open its editor — any edit there saves and **syncs** as
-usual, then the graph refreshes. **Click a key term** (amber) to open a panel listing every meeting
-and note that mentions it, with its Wikipedia/Wikidata links — click a row to jump to that item.
+share (shared terms link items together), **annotations**, **teams**, and the **links** between
+them (cross-meeting links, note auto-links, note→meeting "about", team membership). Scroll to
+**zoom**, drag the background to **pan**, **Fit** to recenter, and use **Show** to scope to
+Personal / All / a team. **Click a meeting or note** (blue/teal) to open its editor — any edit
+there saves and **syncs** as usual, then the graph refreshes. **Click a key term** (amber) to open
+a panel listing every meeting and note that mentions it; **click an annotation** (rose) to edit it.
 
 ## 7. Notes (personal & team)
 

@@ -69,6 +69,12 @@ DCT_BIBLIO = NamedNode("http://purl.org/dc/terms/bibliographicCitation")
 C_PUBLICATION = NamedNode("http://schema.org/ScholarlyArticle")
 P_RESEARCH_GAP = NamedNode(MCO + "research_gap")
 SKOS_RELATED = NamedNode("http://www.w3.org/2004/02/skos/core#related")
+SKOS = "http://www.w3.org/2004/02/skos/core#"
+C_CONCEPT_SCHEME = NamedNode(SKOS + "ConceptScheme")
+C_CONCEPT = NamedNode(SKOS + "Concept")
+SKOS_IN_SCHEME = NamedNode(SKOS + "inScheme")
+SKOS_HAS_TOP_CONCEPT = NamedNode(SKOS + "hasTopConcept")
+SKOS_DEFINITION = NamedNode(SKOS + "definition")
 DCT_RELATION = NamedNode("http://purl.org/dc/terms/relation")
 RDFS_COMMENT = NamedNode("http://www.w3.org/2000/01/rdf-schema#comment")
 SCHEMA_AGENT = NamedNode("http://schema.org/agent")
@@ -76,6 +82,30 @@ SCHEMA_TEXT = NamedNode("http://schema.org/text")
 SCHEMA_KEYWORDS = NamedNode("http://schema.org/keywords")
 DCT_CREATED = NamedNode("http://purl.org/dc/terms/created")
 DCT_MODIFIED = NamedNode("http://purl.org/dc/terms/modified")
+DCT_SUBJECT = NamedNode("http://purl.org/dc/terms/subject")
+RDF_VALUE = NamedNode("http://www.w3.org/1999/02/22-rdf-syntax-ns#value")
+
+# --- Web Annotation (oa) ----------------------------------------------------- #
+OA = "http://www.w3.org/ns/oa#"
+C_ANNOTATION = NamedNode(OA + "Annotation")
+C_SPECIFIC_RESOURCE = NamedNode(OA + "SpecificResource")
+C_TEXT_QUOTE_SELECTOR = NamedNode(OA + "TextQuoteSelector")
+C_TEXTUAL_BODY = NamedNode(OA + "TextualBody")
+OA_HAS_TARGET = NamedNode(OA + "hasTarget")
+OA_HAS_SOURCE = NamedNode(OA + "hasSource")
+OA_HAS_SELECTOR = NamedNode(OA + "hasSelector")
+OA_HAS_BODY = NamedNode(OA + "hasBody")
+OA_EXACT = NamedNode(OA + "exact")
+OA_BODY_VALUE = NamedNode(OA + "bodyValue")
+OA_MOTIVATED_BY = NamedNode(OA + "motivatedBy")
+OA_PURPOSE = NamedNode(OA + "purpose")
+_OA_MOTIVATIONS = {
+    "tagging": NamedNode(OA + "tagging"),
+    "commenting": NamedNode(OA + "commenting"),
+    "identifying": NamedNode(OA + "identifying"),
+    "linking": NamedNode(OA + "linking"),
+    "describing": NamedNode(OA + "describing"),
+}
 ICAL_DUE = NamedNode("http://www.w3.org/2002/12/cal/ical#due")
 XSD_DATETIME = NamedNode("http://www.w3.org/2001/XMLSchema#dateTime")
 XSD_DATE = NamedNode("http://www.w3.org/2001/XMLSchema#date")
@@ -121,6 +151,7 @@ PREFIXES = {
     "skos": "http://www.w3.org/2004/02/skos/core#",
     "foaf": "http://xmlns.com/foaf/0.1/",
     "ical": "http://www.w3.org/2002/12/cal/ical#",
+    "oa": "http://www.w3.org/ns/oa#",
 }
 
 _FORMATS = {
@@ -472,6 +503,150 @@ def serialize_note(rec: dict, summary: dict | None = None, fmt: str = "jsonld") 
     """Build an in-memory graph for one note and serialize it."""
     store = Store()
     store.extend(list(quads_for_note(rec, summary, graph=None)))
+    return _dump(store, fmt, from_graph=DefaultGraph())
+
+
+def annotation_iri(annotation_id) -> str:
+    return f"{BASE}annotation/{annotation_id}"
+
+
+def _annotation_target_iri(target_kind: str, target_id) -> str:
+    return note_iri(target_id) if target_kind == "note" else meeting_iri(target_id)
+
+
+def quads_for_annotation(rec: dict, graph=None) -> Iterator[Quad]:
+    """Yield the RDF quads for one user annotation, per the W3C Web Annotation model.
+
+    ``rec`` is a row from the ``annotations`` table (target_kind/target_id/field,
+    exact, motivation, entity_label, comment, aligned_uri, links, author...).
+    The annotated text becomes an ``oa:TextQuoteSelector`` on an
+    ``oa:SpecificResource`` whose ``oa:hasSource`` is the meeting/note IRI.
+    """
+    import json as _json
+
+    g = graph if graph is not None else DefaultGraph()
+    aid = rec.get("id")
+    a = NamedNode(annotation_iri(aid))
+
+    def q(s, p, o):
+        return Quad(s, p, o, g)
+
+    yield q(a, RDF_TYPE, C_ANNOTATION)
+    created = _dt_literal(rec.get("created_at"))
+    if created is not None:
+        yield q(a, DCT_CREATED, created)
+    modified = _dt_literal(rec.get("updated_at"))
+    if modified is not None:
+        yield q(a, DCT_MODIFIED, modified)
+
+    motivation = (rec.get("motivation") or "tagging").strip()
+    mot = _OA_MOTIVATIONS.get(motivation)
+    if mot is not None:
+        yield q(a, OA_MOTIVATED_BY, mot)
+
+    # Target: a SpecificResource selecting the exact quote within the source.
+    src = NamedNode(_annotation_target_iri(rec.get("target_kind"), rec.get("target_id")))
+    spec = NamedNode(f"{annotation_iri(aid)}/target")
+    yield q(spec, RDF_TYPE, C_SPECIFIC_RESOURCE)
+    yield q(spec, OA_HAS_SOURCE, src)
+    field = (rec.get("field") or "").strip()
+    if field:
+        yield q(spec, DCT_TITLE, Literal(field))  # which part: summary/transcript/body
+    exact = rec.get("exact")
+    if exact:
+        sel = NamedNode(f"{annotation_iri(aid)}/selector")
+        yield q(sel, RDF_TYPE, C_TEXT_QUOTE_SELECTOR)
+        yield q(sel, OA_EXACT, Literal(exact))
+        yield q(spec, OA_HAS_SELECTOR, sel)
+    yield q(a, OA_HAS_TARGET, spec)
+
+    # Bodies.
+    if rec.get("comment"):
+        yield q(a, OA_BODY_VALUE, Literal(rec["comment"]))
+    if rec.get("entity_label"):
+        tag = NamedNode(f"{annotation_iri(aid)}/tag")
+        yield q(tag, RDF_TYPE, C_TEXTUAL_BODY)
+        yield q(tag, RDF_VALUE, Literal(rec["entity_label"]))
+        yield q(tag, OA_PURPOSE, _OA_MOTIVATIONS["tagging"])
+        yield q(a, OA_HAS_BODY, tag)
+        yield q(a, RDFS_LABEL, Literal(rec["entity_label"]))
+    if rec.get("aligned_uri"):
+        concept = NamedNode(rec["aligned_uri"])
+        yield q(a, OA_HAS_BODY, concept)
+        yield q(a, DCT_SUBJECT, concept)
+        if rec.get("aligned_label"):
+            yield q(concept, RDFS_LABEL, Literal(rec["aligned_label"]))
+    try:
+        links = _json.loads(rec.get("links") or "[]")
+    except Exception:
+        links = []
+    for link in links:
+        url = (link or {}).get("url") if isinstance(link, dict) else link
+        if not url:
+            continue
+        node = NamedNode(url)
+        yield q(a, OA_HAS_BODY, node)
+        yield q(a, RDFS_SEEALSO, node)
+        if "wikidata.org" in url or "doi.org" in url:
+            yield q(a, OWL_SAMEAS, node)
+
+    # Author (prov)
+    author = rec.get("author_name")
+    if author and author.strip() and not _is_anon_speaker(author):
+        ag = NamedNode(f"{annotation_iri(aid)}/agent/{_slug(author)}")
+        yield q(ag, RDF_TYPE, C_AGENT)
+        yield q(ag, FOAF_NAME, Literal(author))
+        yield q(a, PROV_ATTRIBUTED, ag)
+
+
+def serialize_annotation(rec: dict, fmt: str = "jsonld") -> bytes:
+    store = Store()
+    store.extend(list(quads_for_annotation(rec, graph=None)))
+    return _dump(store, fmt, from_graph=DefaultGraph())
+
+
+# --- Controlled vocabularies (SKOS) ----------------------------------------- #
+def vocab_iri(vocab_id) -> str:
+    return f"{BASE}vocab/{vocab_id}"
+
+
+def term_iri(vocab_id, term_id, label: str = "") -> str:
+    return f"{vocab_iri(vocab_id)}/term/{term_id}"
+
+
+def quads_for_vocabulary(vocab: dict, terms: list[dict], graph=None) -> Iterator[Quad]:
+    """A user-defined controlled vocabulary as a SKOS ConceptScheme + Concepts."""
+    g = graph if graph is not None else DefaultGraph()
+    vid = vocab.get("id")
+    scheme = NamedNode(vocab_iri(vid))
+
+    def q(s, p, o):
+        return Quad(s, p, o, g)
+
+    yield q(scheme, RDF_TYPE, C_CONCEPT_SCHEME)
+    name = (vocab.get("name") or f"Vocabulary {vid}").strip()
+    yield q(scheme, DCT_TITLE, Literal(name))
+    yield q(scheme, RDFS_LABEL, Literal(name))
+    if vocab.get("description"):
+        yield q(scheme, DCT_DESCRIPTION, Literal(vocab["description"]))
+
+    for t in terms or []:
+        uri = (t.get("uri") or "").strip() or term_iri(vid, t.get("id"))
+        c = NamedNode(uri)
+        yield q(c, RDF_TYPE, C_CONCEPT)
+        label = (t.get("label") or "").strip()
+        if label:
+            yield q(c, SKOS_PREFLABEL, Literal(label))
+            yield q(c, RDFS_LABEL, Literal(label))
+        if t.get("description"):
+            yield q(c, SKOS_DEFINITION, Literal(t["description"]))
+        yield q(c, SKOS_IN_SCHEME, scheme)
+        yield q(scheme, SKOS_HAS_TOP_CONCEPT, c)
+
+
+def serialize_vocabulary(vocab: dict, terms: list[dict], fmt: str = "jsonld") -> bytes:
+    store = Store()
+    store.extend(list(quads_for_vocabulary(vocab, terms, graph=None)))
     return _dump(store, fmt, from_graph=DefaultGraph())
 
 

@@ -124,6 +124,56 @@ class Store:
                 )
                 """
             )
+            # User annotations on a span of a meeting (summary/transcript) or note
+            # (body). Aligned to the Web Annotation model; links are manual.
+            # target_kind is 'meeting' | 'note'; field is 'summary'|'transcript'|'body'.
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS annotations (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_kind   TEXT,
+                    target_id     INTEGER,
+                    field         TEXT,
+                    exact         TEXT,
+                    motivation    TEXT,
+                    entity_label  TEXT,
+                    comment       TEXT,
+                    aligned_uri   TEXT,
+                    aligned_label TEXT,
+                    links         TEXT,
+                    author_name   TEXT,
+                    author_email  TEXT,
+                    created_at    TEXT,
+                    updated_at    TEXT
+                )
+                """
+            )
+            # User-defined controlled vocabularies (SKOS concept schemes) and their
+            # terms, so annotations can align to custom concepts beyond the built-in
+            # ontology. Terms carry a stable URI (minted if not supplied).
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vocabularies (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT,
+                    namespace   TEXT,
+                    description TEXT,
+                    created_at  TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vocab_terms (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vocab_id    INTEGER,
+                    label       TEXT,
+                    uri         TEXT,
+                    description TEXT,
+                    created_at  TEXT
+                )
+                """
+            )
             # Background enrichment jobs for notes (key-term/topic extraction,
             # literature) - mirrors meeting_jobs so status shows and resumes.
             con.execute(
@@ -637,6 +687,150 @@ class Store:
             ).fetchall()
             return [{"kind": r["target_kind"], "id": r["target_id"],
                      "relation": r["relation"], "reason": r["reason"]} for r in rows]
+
+    # ------------------------------------------------------------- annotations
+    _ANNO_COLS = ("id, target_kind, target_id, field, exact, motivation, entity_label, "
+                  "comment, aligned_uri, aligned_label, links, author_name, author_email, "
+                  "created_at, updated_at")
+
+    def add_annotation(
+        self,
+        target_kind: str,
+        target_id: int,
+        field: str,
+        exact: str,
+        motivation: str = "tagging",
+        entity_label: str = "",
+        comment: str = "",
+        aligned_uri: str = "",
+        aligned_label: str = "",
+        links: str = "[]",
+        author_name: str = "",
+        author_email: str = "",
+    ) -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            cur = con.execute(
+                """INSERT INTO annotations
+                   (target_kind, target_id, field, exact, motivation, entity_label, comment,
+                    aligned_uri, aligned_label, links, author_name, author_email, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (target_kind, target_id, field, exact, motivation, entity_label, comment,
+                 aligned_uri, aligned_label, links, author_name, author_email, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def update_annotation(
+        self, annotation_id: int, motivation: str, entity_label: str, comment: str,
+        aligned_uri: str, aligned_label: str, links: str,
+    ) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            con.execute(
+                "UPDATE annotations SET motivation=?, entity_label=?, comment=?, aligned_uri=?, "
+                "aligned_label=?, links=?, updated_at=? WHERE id=?",
+                (motivation, entity_label, comment, aligned_uri, aligned_label, links, now, annotation_id),
+            )
+
+    def get_annotation(self, annotation_id: int) -> dict | None:
+        with self._connect() as con:
+            row = con.execute(
+                f"SELECT {self._ANNO_COLS} FROM annotations WHERE id = ?", (annotation_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_annotations(self, target_kind: str, target_id: int) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                f"SELECT {self._ANNO_COLS} FROM annotations "
+                "WHERE target_kind = ? AND target_id = ? ORDER BY id",
+                (target_kind, target_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_all_annotations(self, limit: int = 5000) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                f"SELECT {self._ANNO_COLS} FROM annotations ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def count_annotations(self, target_kind: str, target_id: int) -> int:
+        with self._connect() as con:
+            return con.execute(
+                "SELECT COUNT(*) FROM annotations WHERE target_kind = ? AND target_id = ?",
+                (target_kind, target_id),
+            ).fetchone()[0]
+
+    def delete_annotation(self, annotation_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM annotations WHERE id = ?", (annotation_id,))
+
+    # ------------------------------------------------ controlled vocabularies
+    def add_vocabulary(self, name: str, namespace: str = "", description: str = "") -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            cur = con.execute(
+                "INSERT INTO vocabularies(name, namespace, description, created_at) VALUES (?, ?, ?, ?)",
+                (name, namespace, description, now),
+            )
+            return int(cur.lastrowid)
+
+    def list_vocabularies(self) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT id, name, namespace, description, created_at FROM vocabularies ORDER BY name"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_vocabulary(self, vocab_id: int) -> dict | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT id, name, namespace, description, created_at FROM vocabularies WHERE id = ?",
+                (vocab_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_vocabulary(self, vocab_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM vocabularies WHERE id = ?", (vocab_id,))
+            con.execute("DELETE FROM vocab_terms WHERE vocab_id = ?", (vocab_id,))
+
+    def add_term(self, vocab_id: int, label: str, uri: str = "", description: str = "") -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as con:
+            cur = con.execute(
+                "INSERT INTO vocab_terms(vocab_id, label, uri, description, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (vocab_id, label, uri, description, now),
+            )
+            return int(cur.lastrowid)
+
+    def set_term_uri(self, term_id: int, uri: str) -> None:
+        with self._connect() as con:
+            con.execute("UPDATE vocab_terms SET uri = ? WHERE id = ?", (uri, term_id))
+
+    def list_terms(self, vocab_id: int) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT id, vocab_id, label, uri, description, created_at FROM vocab_terms "
+                "WHERE vocab_id = ? ORDER BY label",
+                (vocab_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_all_terms(self) -> list[dict]:
+        """Every vocab term with its vocabulary name (for the annotation aligner)."""
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT t.id, t.vocab_id, t.label, t.uri, t.description, v.name AS vocab_name "
+                "FROM vocab_terms t JOIN vocabularies v ON v.id = t.vocab_id ORDER BY v.name, t.label"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_term(self, term_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM vocab_terms WHERE id = ?", (term_id,))
 
     def mark_note_job(self, note_id: int, stage: str, status: str) -> None:
         with self._connect() as con:

@@ -906,6 +906,72 @@ class MainWindow(QWidget):
         self._run_async(work, lambda msg, ok: (None if msg in ("ok", "OK")
                                                else self.status_label.setText(f"⚠ {msg}")))
 
+    # ----- annotations & vocabularies (sync + helpers) -----
+    def _mco_classes(self) -> list[tuple]:
+        """Built-in ontology classes offered when aligning an annotation."""
+        base = "https://tekrajchhetri.com/mco/"
+        return [("Meeting", base + "Meeting"), ("Note", base + "Note"),
+                ("Topic", base + "Topic"), ("Decision", base + "Decision"),
+                ("Action item", base + "ActionItem"), ("Open question", base + "OpenQuestion"),
+                ("Key term", base + "KeyTerm"), ("Team", base + "Team"),
+                ("Publication", base + "Publication"), ("Agent (person)", base + "Agent")]
+
+    def _extern_annotation_rec(self, rec: dict) -> dict:
+        """Map an annotation's id + target_id to global ids for the shared store."""
+        rec = dict(rec)
+        if rec.get("id") is not None:
+            rec["id"] = self._gid(rec["id"])
+        if rec.get("target_id") is not None:
+            rec["target_id"] = self._gid(rec["target_id"])
+        return rec
+
+    def _push_annotation_async(self, annotation_id) -> None:
+        if annotation_id is None or self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+
+        def work():
+            rec = self.store.get_annotation(annotation_id)
+            if not rec:
+                return "no record"
+            res = external.push_annotation(self._extern_annotation_rec(rec), cfg)
+            bad = [f"{k}: {v}" for k, v in res.items() if v != "ok"]
+            return "Annotation sync failed — " + "; ".join(bad) if bad else "ok"
+
+        self._run_async(work, lambda m, ok: (None if m in ("ok", "OK")
+                                             else self.status_label.setText(f"⚠ {m}")))
+
+    def _delete_annotation_remote_async(self, annotation_id) -> None:
+        if annotation_id is None or self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+        gid = self._gid(annotation_id)
+        self._run_async(lambda: (external.delete_annotation_remote(gid, cfg) and "") or "",
+                        lambda m, ok: None)
+
+    def _push_vocabulary_async(self, vocab_id) -> None:
+        if vocab_id is None or self._storage_mode() == "local_only" or self._team_readonly:
+            return
+        cfg = self._current_external_cfg()
+        if not (cfg.relational.enabled or cfg.graph.enabled):
+            return
+        from . import external
+
+        def work():
+            v = self.store.get_vocabulary(vocab_id)
+            if not v:
+                return "no vocab"
+            external.push_vocabulary(v, self.store.list_terms(vocab_id), cfg)
+            return "ok"
+
+        self._run_async(work, lambda m, ok: None)
+
     def _delete_note_remote_async(self, note_id) -> None:
         if note_id is None or self._storage_mode() == "local_only" or self._team_readonly:
             return
@@ -1053,7 +1119,8 @@ class MainWindow(QWidget):
         row.addWidget(self.graph_scope_combo)
         # Legend
         for label, color in (("Meeting", "#2563eb"), ("Note", "#0d9488"),
-                             ("Key term", "#f59e0b"), ("Team", "#7c3aed")):
+                             ("Key term", "#f59e0b"), ("Annotation", "#e11d48"),
+                             ("Team", "#7c3aed")):
             chip = QLabel(f"●  {label}")
             chip.setStyleSheet(f"color:{color}; font-weight:700; font-size:11px;")
             row.addWidget(chip)
@@ -1175,6 +1242,23 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
+        # Annotations on the meetings/notes in scope, with their aligned concepts.
+        try:
+            for a in self.store.list_all_annotations():
+                tkind, tid = a.get("target_kind"), a.get("target_id")
+                target_key = f"m{tid}" if tkind == "meeting" else f"n{tid}"
+                if target_key not in nodes:
+                    continue
+                label = (a.get("entity_label") or a.get("aligned_label")
+                         or (a.get("exact") or "")[:24] or (a.get("motivation") or "note"))
+                ak = add(f"a{a.get('id')}", label, "annotation", a.get("id"))
+                edges.append((ak, target_key))
+                if a.get("aligned_uri"):
+                    ck = add(f"c:{a['aligned_uri']}", a.get("aligned_label") or "concept", "term")
+                    edges.append((ak, ck))
+        except Exception:
+            pass
+
         dropped = False
         if len(nodes) > 320:  # keep it legible: drop key-term nodes on very large graphs
             term_keys = {k for k, mta in nodes.items() if mta["kind"] == "term"}
@@ -1194,7 +1278,9 @@ class MainWindow(QWidget):
         n_m = sum(1 for v in nodes.values() if v["kind"] == "meeting")
         n_n = sum(1 for v in nodes.values() if v["kind"] == "note")
         n_t = sum(1 for v in nodes.values() if v["kind"] == "term")
-        msg = f"{n_m} meeting(s) · {n_n} note(s) · {n_t} key term(s) · {len(edges)} link(s)"
+        n_a = sum(1 for v in nodes.values() if v["kind"] == "annotation")
+        msg = (f"{n_m} meeting(s) · {n_n} note(s) · {n_a} annotation(s) · "
+               f"{n_t} key term(s) · {len(edges)} link(s)")
         if dropped:
             msg += "  ·  key terms hidden (graph too large) — narrow the scope to see them"
         elif not nodes:
@@ -1215,6 +1301,10 @@ class MainWindow(QWidget):
                     NoteEditorDialog(self, rec).exec()
             elif kind == "term":
                 TermUsageDialog(self, str(ref)).exec()
+            elif kind == "annotation":
+                rec = self.store.get_annotation(ref)
+                if rec:
+                    AnnotationDialog(self, rec=rec).exec()
         except Exception:
             return
         self._refresh_graph()
@@ -1691,15 +1781,35 @@ bundled MCO ontology's <code>Note</code> class.</p>
   <li><b>Auto-link (opt-in):</b> tick <b>Auto-link new notes to related meetings &amp; notes</b>.
       On save, an agent links the note to genuinely related meeting summaries and notes; they appear
       under <b>Related meetings &amp; notes</b>, are written into the graph, and sync to your team.</li>
+  <li><b>Dictate by voice:</b> in <b>Edit</b> mode, click <b>🎤 Dictate</b> and speak — your mic is
+      transcribed (using the configured engine) and inserted into the note. Click again to stop.</li>
+</ul>
+
+<h2>Annotations &amp; controlled vocabularies</h2>
+<p>Annotate any entity or sentence in a <b>meeting summary, transcript, or note</b> (W3C Web
+Annotation model). <b>Select the text</b>, then either press <b>⌘⇧A</b> (Ctrl+Shift+A),
+<b>right-click → Annotate selection</b>, or use the <b>✎ Annotate</b> button.</p>
+<ul>
+  <li><b>Tag &amp; align:</b> set a motivation (tag / comment / identify / link / describe), a label,
+      and align the span to a built-in <b>MCO ontology</b> class <i>or</i> one of your own
+      controlled-vocabulary terms.</li>
+  <li><b>Link out (manual):</b> add links to <b>Wikipedia, Wikidata, DOI, or any URI</b> — type them
+      (one per line, “Label | URL”) or use <b>🔎 Look up</b> to fetch verified Wikipedia/Wikidata links.</li>
+  <li><b>Controlled vocabularies:</b> when the built-in ontology is too limited, open
+      <b>Manage vocab…</b> to create your own <b>SKOS</b> term lists; terms get stable URIs and are
+      offered in the aligner. Annotations and vocabularies save, sync to your team, and export as RDF.</li>
+  <li><b>Annotations</b> on each meeting/note are listed under the <b>Annotations</b> button and
+      appear as nodes in the Graph tab.</li>
 </ul>
 
 <h2>Graph</h2>
 <p>The <b>🕸 Graph</b> tab visualises your knowledge graph — meetings, notes, the key terms they
-share, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>Fit</b> to
-recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Click a meeting or note</b>
-(blue/teal) to open and edit it — your changes save and sync, then the graph refreshes. <b>Click a
-key term</b> (amber) to see every meeting and note that mentions it, with its Wikipedia/Wikidata
-links. Colours: blue = meeting, teal = note, amber = key term, purple = team.</p>
+share, <b>annotations</b>, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to
+pan, <b>Fit</b> to recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Click a meeting
+or note</b> (blue/teal) to open and edit it — your changes save and sync, then the graph refreshes.
+<b>Click a key term</b> (amber) to see every meeting and note that mentions it; <b>click an
+annotation</b> (rose) to edit it. Colours: blue = meeting, teal = note, amber = key term/concept,
+rose = annotation, purple = team.</p>
 
 <h2>Capturing meeting (system) audio</h2>
 <p>To transcribe the other participants, route system audio through a virtual
@@ -1818,6 +1928,21 @@ literature.</p>
       PubMed papers (PMID/DOI) and research gaps, when PubMed is enabled.</li>
   <li><b>Provenance</b> — which transcription and notes models produced the result,
       recorded in the notes and in the knowledge graph.</li>
+</ul>
+
+<h2>Notes, annotations &amp; the graph</h2>
+<ul>
+  <li><b>📝 Notes</b> — write notes directly (or <b>dictate by voice</b>); they're AI-enriched into
+      the same knowledge graph as meetings, can be personal or shared to a team, and can link to a
+      meeting and to related notes.</li>
+  <li><b>✎ Annotations</b> — select any entity or sentence in a meeting or note and annotate it
+      (Web Annotation model): tag it, <b>align it to an ontology class or your own controlled
+      vocabulary</b>, and <b>manually link to Wikipedia / Wikidata / DOI / any URI</b>. Select then
+      press <b>⌘⇧A</b> or right-click → Annotate.</li>
+  <li><b>🏷️ Controlled vocabularies</b> — define your own SKOS term lists when the built-in
+      ontology is too limited; terms get stable URIs and sync to your team.</li>
+  <li><b>🕸 Graph</b> — explore meetings, notes, shared key terms, annotations and teams visually;
+      click a node to open/edit it. Everything exports as RDF.</li>
 </ul>
 
 <h2>Speakers &amp; the summary</h2>
@@ -4746,7 +4871,8 @@ class MeetingDetailDialog(QDialog):
         title = rec.get("title") or "Meeting"
         self.setWindowTitle(f"MeetGraph — {title}" + ("  (shared)" if remote else ""))
         self.setWindowIcon(app_icon())
-        self.resize(780, 700)
+        self.setMinimumWidth(940)
+        self.resize(1180, 780)
 
         self._summary_md = rec.get("summary_md") or f"# {title}\n\n_No summary was generated._"
         self._transcript_md = rec.get("transcript_md") or "_No transcript._"
@@ -4788,6 +4914,10 @@ class MeetingDetailDialog(QDialog):
         self._view.setOpenExternalLinks(False)
         self._view.anchorClicked.connect(self._on_anchor)
         self._view.setFont(QFont("SF Pro Text", 13))
+        # Select text, then right-click → Annotate, or press the shortcut.
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._view.customContextMenuRequested.connect(self._view_context_menu)
+        QShortcut(QKeySequence("Ctrl+Shift+A"), self, activated=self._annotate)
         v.addWidget(self._view, 1)
         # Raw-markdown editor (hidden until "Edit"): lets the user refine/add info.
         self._editor = QTextEdit()
@@ -4814,9 +4944,13 @@ class MeetingDetailDialog(QDialog):
         copy = QPushButton("Copy")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self._current_md()))
         row.addWidget(copy)
-        exp = QPushButton("Export .md")
-        exp.setObjectName("primary")
-        exp.clicked.connect(self._export)
+        from PyQt6.QtWidgets import QMenu
+        exp = QPushButton("Export ▾")
+        exp.setToolTip("Export this meeting as Markdown or RDF (knowledge graph)")
+        _exp_menu = QMenu(exp)
+        _exp_menu.addAction("Markdown (.md)…", self._export)
+        _exp_menu.addAction("RDF — Turtle / JSON-LD…", self._export_rdf)
+        exp.setMenu(_exp_menu)
         row.addWidget(exp)
         self._papers_btn = QPushButton("Find papers")
         self._papers_btn.setToolTip("Search PubMed for related publications (PMID + DOI) and attach them")
@@ -4831,11 +4965,16 @@ class MeetingDetailDialog(QDialog):
         snd.setToolTip("Send this meeting to REST API / MCP / databases (skips already-sent)")
         snd.clicked.connect(lambda: self._parent._open_send_dialog([self._mid], "Send this meeting"))
         row.addWidget(snd)
-        rdf = QPushButton("Export RDF…")
-        rdf.setToolTip("Export this meeting as a knowledge graph (JSON-LD / Turtle), "
-                       "with key terms linked to Wikipedia/Wikidata and links to previous meetings.")
-        rdf.clicked.connect(self._export_rdf)
-        row.addWidget(rdf)
+        ann = QPushButton("✎ Annotate")
+        ann.setToolTip("Select text above, then annotate it — tag an entity/sentence, align to an "
+                       "ontology or controlled vocabulary, and link to external resources.")
+        ann.clicked.connect(self._annotate)
+        ann.setEnabled(not self._remote)
+        row.addWidget(ann)
+        self._anns_btn = QPushButton("Annotations")
+        self._anns_btn.clicked.connect(self._open_annotations)
+        row.addWidget(self._anns_btn)
+        self._refresh_anno_count()
         share = QPushButton("Share…")
         share.clicked.connect(self._share)
         row.addWidget(share)
@@ -4975,6 +5114,42 @@ class MeetingDetailDialog(QDialog):
 
     def _update_view(self) -> None:
         self._view.setMarkdown(self._current_md())
+
+    # ----- annotations -----
+    def _refresh_anno_count(self) -> None:
+        if not hasattr(self, "_anns_btn") or self._mid is None:
+            return
+        try:
+            n = self._parent.store.count_annotations("meeting", self._mid)
+        except Exception:
+            n = 0
+        self._anns_btn.setText(f"Annotations ({n})" if n else "Annotations")
+
+    def _annotate(self) -> None:
+        if self._remote or self._mid is None:
+            return
+        exact = (self._view.textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
+        if not exact:
+            QMessageBox.information(self, "Select text first",
+                                   "Select some text in the summary or transcript above, then click Annotate.")
+            return
+        field = "transcript" if self._scope() == "transcript" else "summary"
+        dlg = AnnotationDialog(self._parent, "meeting", self._mid, field, exact)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_anno_count()
+
+    def _open_annotations(self) -> None:
+        AnnotationsPanel(self._parent, "meeting", self._mid).exec()
+        self._refresh_anno_count()
+
+    def _view_context_menu(self, pos) -> None:
+        menu = self._view.createStandardContextMenu()
+        menu.addSeparator()
+        act = menu.addAction("✎ Annotate selection  (⌘⇧A)")
+        act.setEnabled(not self._remote and self._mid is not None
+                       and bool((self._view.textCursor().selectedText() or "").strip()))
+        act.triggered.connect(self._annotate)
+        menu.exec(self._view.mapToGlobal(pos))
 
     def _export(self) -> str | None:
         scope = self._scope()
@@ -5198,6 +5373,17 @@ class MarkdownEditor(QWidget):
         for b in self._tools:
             b.setEnabled(not ro)
 
+    def append_text(self, text: str) -> None:
+        """Append transcribed/dictated text at the end of the document."""
+        if not text:
+            return
+        cur = self.editor.textCursor()
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        existing = self.editor.toPlainText() if self._source else self.editor.document().toPlainText()
+        sep = "" if (not existing or existing.endswith((" ", "\n"))) else " "
+        cur.insertText(sep + text)
+        self.editor.setTextCursor(cur)
+
     # --- source toggle ---
     def _toggle_source(self) -> None:
         if not self._source:  # rich -> raw markdown source
@@ -5337,8 +5523,8 @@ class NoteEditorDialog(QDialog):
         title = self._rec.get("title") or ("New note" if self._new else "Note")
         self.setWindowTitle(f"MeetGraph — {title}" + ("  (shared)" if remote else ""))
         self.setWindowIcon(app_icon())
-        self.setMinimumSize(640, 560)
-        self.resize(860, 860)
+        self.setMinimumSize(900, 600)
+        self.resize(1120, 880)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(20, 18, 20, 18)
@@ -5385,6 +5571,10 @@ class NoteEditorDialog(QDialog):
         self._view.setObjectName("transcript")
         self._view.setOpenExternalLinks(True)
         self._view.setFont(QFont("SF Pro Text", 13))
+        # Select text, then right-click → Annotate, or press the shortcut.
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._view.customContextMenuRequested.connect(self._view_context_menu)
+        QShortcut(QKeySequence("Ctrl+Shift+A"), self, activated=self._annotate)
         v.addWidget(self._view, 1)
 
         # --- rich editor (edit mode) ---
@@ -5410,20 +5600,31 @@ class NoteEditorDialog(QDialog):
         self._btn_cancel = QPushButton("Cancel")
         self._btn_cancel.clicked.connect(self._cancel_edit)
         row.addWidget(self._btn_cancel)
+        self._btn_dictate = QPushButton("🎤 Dictate")
+        self._btn_dictate.setCheckable(True)
+        self._btn_dictate.setToolTip("Dictate your note by voice — transcribes your mic and inserts the text.")
+        self._btn_dictate.clicked.connect(self._toggle_dictate)
+        row.addWidget(self._btn_dictate)
+        self._btn_annotate = QPushButton("✎ Annotate")
+        self._btn_annotate.setToolTip("Select text in the note above, then annotate it (tag/align/link).")
+        self._btn_annotate.clicked.connect(self._annotate)
+        row.addWidget(self._btn_annotate)
+        self._btn_anns = QPushButton("Annotations")
+        self._btn_anns.clicked.connect(self._open_annotations)
+        row.addWidget(self._btn_anns)
         self._btn_share = QPushButton("Share to team…")
         self._btn_share.setToolTip("Share this personal note into a team's shared database")
         self._btn_share.clicked.connect(self._share_to_team)
         row.addWidget(self._btn_share)
-        self._btn_pdf = QPushButton("Export PDF…")
-        self._btn_pdf.clicked.connect(self._export_pdf)
-        row.addWidget(self._btn_pdf)
-        self._btn_md = QPushButton("Export .md")
-        self._btn_md.clicked.connect(self._export_md)
-        row.addWidget(self._btn_md)
-        self._btn_rdf = QPushButton("Export RDF…")
-        self._btn_rdf.setToolTip("Export this note as a knowledge graph (JSON-LD / Turtle).")
-        self._btn_rdf.clicked.connect(self._export_rdf)
-        row.addWidget(self._btn_rdf)
+        from PyQt6.QtWidgets import QMenu
+        self._btn_export = QPushButton("Export ▾")
+        self._btn_export.setToolTip("Export this note as PDF, Markdown, or RDF (knowledge graph)")
+        _exp_menu = QMenu(self._btn_export)
+        _exp_menu.addAction("PDF…", self._export_pdf)
+        _exp_menu.addAction("Markdown (.md)…", self._export_md)
+        _exp_menu.addAction("RDF — Turtle / JSON-LD…", self._export_rdf)
+        self._btn_export.setMenu(_exp_menu)
+        row.addWidget(self._btn_export)
         self._btn_email = QPushButton("Email…")
         self._btn_email.clicked.connect(self._email)
         row.addWidget(self._btn_email)
@@ -5498,11 +5699,114 @@ class NoteEditorDialog(QDialog):
         self._btn_edit.setVisible(not editing and not self._remote)
         for b in (self._btn_share,):
             b.setVisible(not editing and not self._remote)
-        for b in (self._btn_pdf, self._btn_md, self._btn_rdf, self._btn_email, self._btn_copy):
+        for b in (self._btn_export, self._btn_email, self._btn_copy):
             b.setVisible(not editing)
         self._btn_send.setVisible(not editing and not self._remote)
+        self._btn_dictate.setVisible(editing and not self._remote)        # voice input while editing
+        if not editing:
+            self._stop_dictation()
+        self._btn_annotate.setVisible(not editing and not self._remote)   # annotate the rendered note
+        self._btn_anns.setVisible(not editing)
+        self._refresh_anno_count()
         self._btn_delete.setVisible(not self._remote)
         self._update_subtitle()
+
+    # ----- annotations -----
+    def _refresh_anno_count(self) -> None:
+        if not hasattr(self, "_btn_anns") or self._nid is None:
+            if hasattr(self, "_btn_anns"):
+                self._btn_anns.setText("Annotations")
+            return
+        try:
+            n = self._parent.store.count_annotations("note", self._nid)
+        except Exception:
+            n = 0
+        self._btn_anns.setText(f"Annotations ({n})" if n else "Annotations")
+
+    def _annotate(self) -> None:
+        if self._remote or self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before annotating it.")
+            return
+        exact = (self._view.textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
+        if not exact:
+            QMessageBox.information(self, "Select text first",
+                                   "Select some text in the note above, then click Annotate.")
+            return
+        dlg = AnnotationDialog(self._parent, "note", self._nid, "body", exact)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_anno_count()
+
+    def _open_annotations(self) -> None:
+        if self._nid is None:
+            QMessageBox.information(self, "Save first", "Save the note before viewing annotations.")
+            return
+        AnnotationsPanel(self._parent, "note", self._nid).exec()
+        self._refresh_anno_count()
+
+    def _view_context_menu(self, pos) -> None:
+        menu = self._view.createStandardContextMenu()
+        menu.addSeparator()
+        act = menu.addAction("✎ Annotate selection  (⌘⇧A)")
+        act.setEnabled(not self._remote and self._nid is not None
+                       and bool((self._view.textCursor().selectedText() or "").strip()))
+        act.triggered.connect(self._annotate)
+        menu.exec(self._view.mapToGlobal(pos))
+
+    # ----- voice dictation -----
+    def _toggle_dictate(self) -> None:
+        if self._btn_dictate.isChecked():
+            self._start_dictation()
+        else:
+            self._stop_dictation()
+
+    def _start_dictation(self) -> None:
+        p = self._parent
+        try:
+            dev = p._device_by_index(p.mic_combo.currentData())
+        except Exception:
+            dev = None
+        if dev is None:
+            QMessageBox.warning(self, "No microphone",
+                                "Pick a microphone in Configuration → Transcription engine first.")
+            self._btn_dictate.setChecked(False)
+            return
+        config = p._transcription_config()
+        config["diarization"] = "off"   # single-speaker dictation
+        from .controller import TranscriptionController
+
+        self._dictation = TranscriptionController()
+        self._dictation.new_text.connect(self._on_dictated)
+        self._dictation.error.connect(lambda m: self.status.setText(f"⚠ {m}"))
+        try:
+            self._dictation.start(config, [(dev, "You")])
+        except Exception as exc:
+            QMessageBox.warning(self, "Dictation", f"Couldn't start the microphone: {exc}")
+            self._dictation = None
+            self._btn_dictate.setChecked(False)
+            return
+        self._btn_dictate.setText("⏹ Stop dictation")
+        self.status.setText("🎤 Listening… speak; your words are inserted into the note.")
+
+    def _on_dictated(self, _speaker, _ts, text: str) -> None:
+        if text and text.strip():
+            self._editor.append_text(text.strip())
+
+    def _stop_dictation(self) -> None:
+        ctrl = getattr(self, "_dictation", None)
+        if ctrl is not None:
+            try:
+                ctrl.stop()
+            except Exception:
+                pass
+            self._dictation = None
+            self.status.setText("Dictation stopped.")
+        if hasattr(self, "_btn_dictate"):
+            self._btn_dictate.setChecked(False)
+            self._btn_dictate.setText("🎤 Dictate")
+
+    def done(self, r: int) -> None:  # ensure the mic is released when the dialog closes
+        self._stop_dictation()
+        super().done(r)
 
     def _enter_edit(self) -> None:
         if self._remote:
@@ -6339,7 +6643,8 @@ class _GraphCanvas(QGraphicsView):
     """Renders the knowledge graph; scroll to zoom, drag the background to pan,
     click a meeting/note node to open it."""
 
-    _COLORS = {"meeting": "#2563eb", "note": "#0d9488", "term": "#f59e0b", "team": "#7c3aed"}
+    _COLORS = {"meeting": "#2563eb", "note": "#0d9488", "term": "#f59e0b",
+               "team": "#7c3aed", "annotation": "#e11d48"}
 
     def __init__(self, on_activate):
         super().__init__()
@@ -6579,6 +6884,542 @@ class TermUsageDialog(QDialog):
         except Exception:
             return
         self._win._refresh_graph()
+
+
+class AnnotationDialog(QDialog):
+    """Create or edit one annotation on a span of a meeting or note: pick a
+    motivation, tag/label it, align it to an ontology class or a controlled-
+    vocabulary term, and add manual links to external knowledge bases."""
+
+    _MOTIVATIONS = [("Tag an entity", "tagging"), ("Comment", "commenting"),
+                    ("Identify", "identifying"), ("Link", "linking"), ("Describe", "describing")]
+
+    def __init__(self, main_window, target_kind=None, target_id=None, field="", exact="", rec=None):
+        super().__init__(main_window)
+        self._win = main_window
+        self._rec = dict(rec or {})
+        self._editing = rec is not None
+        self._target_kind = self._rec.get("target_kind", target_kind)
+        self._target_id = self._rec.get("target_id", target_id)
+        self._field = self._rec.get("field", field)
+        self._exact = self._rec.get("exact", exact)
+        self.setWindowTitle("MeetGraph — Annotate")
+        self.setWindowIcon(app_icon())
+        self.resize(620, 640)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        head = QLabel("Edit annotation" if self._editing else "New annotation")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        quote = QTextBrowser()
+        quote.setObjectName("KGCard")
+        quote.setMaximumHeight(90)
+        quote.setPlainText(self._exact or "(no text selected)")
+        v.addWidget(quote)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.motivation = QComboBox()
+        for label, val in self._MOTIVATIONS:
+            self.motivation.addItem(label, val)
+        i = self.motivation.findData(self._rec.get("motivation") or "tagging")
+        self.motivation.setCurrentIndex(i if i >= 0 else 0)
+        form.addRow("Motivation", self.motivation)
+
+        self.entity_label = QLineEdit(self._rec.get("entity_label") or "")
+        self.entity_label.setPlaceholderText("e.g. Kubernetes, MIT, ReproSchema (for tagging)")
+        form.addRow("Entity / label", self.entity_label)
+
+        self.comment = QLineEdit(self._rec.get("comment") or "")
+        self.comment.setPlaceholderText("free-text note about this span (optional)")
+        form.addRow("Comment", self.comment)
+
+        align_row = QHBoxLayout(); align_row.setSpacing(6)
+        self.align_combo = QComboBox()
+        self._populate_align()
+        align_row.addWidget(self.align_combo, 1)
+        manage = QPushButton("Manage vocab…")
+        manage.setToolTip("Create your own controlled vocabularies / terms")
+        manage.clicked.connect(self._manage_vocab)
+        align_row.addWidget(manage)
+        form.addRow("Align to", self._wrap(align_row))
+
+        self.custom_uri = QLineEdit(); self.custom_uri.setPlaceholderText("https://… (concept URI)")
+        self.custom_label = QLineEdit(); self.custom_label.setPlaceholderText("label for the concept")
+        self._custom_row = QWidget()
+        crl = QHBoxLayout(self._custom_row); crl.setContentsMargins(0, 0, 0, 0); crl.setSpacing(6)
+        crl.addWidget(self.custom_uri, 2); crl.addWidget(self.custom_label, 1)
+        form.addRow("Custom concept", self._custom_row)
+        self.align_combo.currentIndexChanged.connect(self._sync_custom_row)
+        v.addLayout(form)
+
+        v.addWidget(QLabel("External links — one per line, URL or “Label | URL” (Wikipedia, Wikidata, DOI, any URI)"))
+        self.links_edit = QTextEdit()
+        self.links_edit.setObjectName("transcript")
+        self.links_edit.setMaximumHeight(110)
+        self.links_edit.setPlainText(self._links_to_text(self._rec.get("links")))
+        v.addWidget(self.links_edit)
+        lk_row = QHBoxLayout()
+        lookup = QPushButton("🔎 Look up on Wikipedia/Wikidata")
+        lookup.setToolTip("Resolve the entity/label (or selected text) and append verified links")
+        lookup.clicked.connect(self._lookup)
+        lk_row.addWidget(lookup)
+        self._lookup_status = QLabel("")
+        self._lookup_status.setStyleSheet("color:#64748b; font-size:11px;")
+        lk_row.addWidget(self._lookup_status, 1)
+        v.addLayout(lk_row)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#64748b; font-size:11px;")
+        v.addWidget(self.status)
+
+        row = QHBoxLayout(); row.addStretch()
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        save = QPushButton("Save"); save.setObjectName("primary"); save.clicked.connect(self._save)
+        row.addWidget(save)
+        v.addLayout(row)
+        self._sync_custom_row()
+
+    @staticmethod
+    def _wrap(layout) -> QWidget:
+        w = QWidget(); w.setLayout(layout); return w
+
+    def _populate_align(self) -> None:
+        prev = self.align_combo.currentData()
+        self.align_combo.blockSignals(True)
+        self.align_combo.clear()
+        self.align_combo.addItem("(no alignment)", None)
+        for label, uri in self._win._mco_classes():
+            self.align_combo.addItem(f"MCO · {label}", (uri, label))
+        try:
+            for t in self._win.store.list_all_terms():
+                uri = t.get("uri") or ""
+                self.align_combo.addItem(f"Vocab · {t.get('vocab_name')} · {t.get('label')}",
+                                         (uri, t.get("label")))
+        except Exception:
+            pass
+        self.align_combo.addItem("✎ Custom URI…", "__custom__")
+        # restore / preselect existing alignment
+        cur = self._rec.get("aligned_uri")
+        if cur:
+            idx = next((i for i in range(self.align_combo.count())
+                        if isinstance(self.align_combo.itemData(i), tuple)
+                        and self.align_combo.itemData(i)[0] == cur), -1)
+            if idx >= 0:
+                self.align_combo.setCurrentIndex(idx)
+            else:
+                self.align_combo.setCurrentIndex(self.align_combo.findData("__custom__"))
+        elif prev is not None:
+            j = self.align_combo.findData(prev)
+            if j >= 0:
+                self.align_combo.setCurrentIndex(j)
+        self.align_combo.blockSignals(False)
+
+    def _sync_custom_row(self) -> None:
+        custom = self.align_combo.currentData() == "__custom__"
+        self._custom_row.setVisible(custom)
+        if custom and not self.custom_uri.text() and self._rec.get("aligned_uri"):
+            self.custom_uri.setText(self._rec.get("aligned_uri") or "")
+            self.custom_label.setText(self._rec.get("aligned_label") or "")
+
+    def _manage_vocab(self) -> None:
+        VocabularyManagerDialog(self._win).exec()
+        self._populate_align()
+
+    @staticmethod
+    def _links_to_text(links) -> str:
+        import json as _json
+        if isinstance(links, str):
+            try:
+                links = _json.loads(links or "[]")
+            except Exception:
+                links = []
+        out = []
+        for l in links or []:
+            if isinstance(l, dict):
+                lbl, url = l.get("label") or "", l.get("url") or ""
+                out.append(f"{lbl} | {url}" if lbl else url)
+            elif l:
+                out.append(str(l))
+        return "\n".join(out)
+
+    def _parse_links(self) -> list:
+        links = []
+        for line in self.links_edit.toPlainText().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                lbl, url = line.split("|", 1)
+                links.append({"label": lbl.strip(), "url": url.strip()})
+            else:
+                links.append({"label": "", "url": line})
+        return links
+
+    def _lookup(self) -> None:
+        term = self.entity_label.text().strip() or (self._exact or "").strip()
+        if not term:
+            self._lookup_status.setText("Enter an entity/label first.")
+            return
+        self._lookup_status.setText("Looking up…")
+
+        def work():
+            from .wikipedia import resolve_terms
+            links = resolve_terms([term])
+            return links.get(term)
+
+        def done(link, ok):
+            if not ok or link is None:
+                self._lookup_status.setText("No match found.")
+                return
+            existing = self.links_edit.toPlainText().rstrip()
+            add = []
+            if getattr(link, "wikipedia", None):
+                add.append(f"Wikipedia | {link.wikipedia}")
+            if getattr(link, "wikidata", None):
+                add.append(f"Wikidata | {link.wikidata}")
+            if add:
+                self.links_edit.setPlainText((existing + "\n" + "\n".join(add)).strip())
+                self._lookup_status.setText("Added verified link(s).")
+            else:
+                self._lookup_status.setText("No match found.")
+
+        self._win._run_async(work, done)
+
+    def _save(self) -> None:
+        import json as _json
+
+        p = self._win
+        motivation = self.motivation.currentData() or "tagging"
+        entity = self.entity_label.text().strip()
+        comment = self.comment.text().strip()
+        data = self.align_combo.currentData()
+        if data == "__custom__":
+            aligned_uri = self.custom_uri.text().strip()
+            aligned_label = self.custom_label.text().strip()
+        elif isinstance(data, tuple):
+            aligned_uri, aligned_label = data[0], data[1]
+        else:
+            aligned_uri, aligned_label = "", ""
+        links_json = _json.dumps(self._parse_links())
+        try:
+            if self._editing:
+                aid = self._rec.get("id")
+                p.store.update_annotation(aid, motivation, entity, comment,
+                                          aligned_uri, aligned_label, links_json)
+                p._audit("annotation_edited", aid, entity or motivation)
+            else:
+                aid = p.store.add_annotation(
+                    self._target_kind, self._target_id, self._field, self._exact,
+                    motivation=motivation, entity_label=entity, comment=comment,
+                    aligned_uri=aligned_uri, aligned_label=aligned_label, links=links_json,
+                    author_name=p._display_name, author_email=p.user_email)
+                p._audit("annotation_added", aid, entity or motivation)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        p._push_annotation_async(aid)
+        self.accept()
+
+
+class AnnotationsPanel(QDialog):
+    """List, edit, delete and export the annotations on a meeting or note."""
+
+    def __init__(self, main_window, target_kind, target_id):
+        super().__init__(main_window)
+        self._win = main_window
+        self._kind = target_kind
+        self._tid = target_id
+        self.setWindowTitle("MeetGraph — Annotations")
+        self.setWindowIcon(app_icon())
+        self.resize(720, 460)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        head = QLabel("Annotations")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Select text in the note/meeting and click ✎ Annotate to add more. "
+                     "Annotations follow the Web Annotation model and sync with the knowledge graph.")
+        sub.setObjectName("HeaderSubtitle")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Quote", "Motivation", "Tag / concept", "Links"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.cellDoubleClicked.connect(lambda *_: self._edit())
+        v.addWidget(self.table, 1)
+
+        row = QHBoxLayout()
+        edit = QPushButton("Edit"); edit.clicked.connect(self._edit); row.addWidget(edit)
+        delete = QPushButton("Delete"); delete.setObjectName("danger")
+        delete.clicked.connect(self._delete); row.addWidget(delete)
+        rdf = QPushButton("Export RDF…"); rdf.clicked.connect(self._export_rdf); row.addWidget(rdf)
+        row.addStretch()
+        close = QPushButton("Close"); close.clicked.connect(self.accept); row.addWidget(close)
+        v.addLayout(row)
+        self._reload()
+
+    def _reload(self) -> None:
+        import json as _json
+
+        self._rows = self._win.store.list_annotations(self._kind, self._tid)
+        self.table.setRowCount(0)
+        for a in self._rows:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            quote = (a.get("exact") or "").replace("\n", " ")
+            it = QTableWidgetItem(quote[:80] + ("…" if len(quote) > 80 else ""))
+            it.setData(Qt.ItemDataRole.UserRole, a.get("id"))
+            self.table.setItem(r, 0, it)
+            self.table.setItem(r, 1, QTableWidgetItem(a.get("motivation") or ""))
+            concept = a.get("entity_label") or a.get("aligned_label") or ""
+            self.table.setItem(r, 2, QTableWidgetItem(concept))
+            try:
+                n = len(_json.loads(a.get("links") or "[]"))
+            except Exception:
+                n = 0
+            self.table.setItem(r, 3, QTableWidgetItem(str(n) if n else ""))
+
+    def _selected_id(self):
+        r = self.table.currentRow()
+        if r < 0:
+            return None
+        it = self.table.item(r, 0)
+        return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+    def _edit(self) -> None:
+        aid = self._selected_id()
+        if aid is None:
+            return
+        rec = self._win.store.get_annotation(aid)
+        if rec and AnnotationDialog(self._win, rec=rec).exec() == QDialog.DialogCode.Accepted:
+            self._reload()
+
+    def _delete(self) -> None:
+        aid = self._selected_id()
+        if aid is None:
+            return
+        if QMessageBox.question(self, "Delete annotation", "Delete this annotation?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._win.store.delete_annotation(aid)
+            self._win._audit("annotation_deleted", aid)
+            self._win._delete_annotation_remote_async(aid)
+        except Exception:
+            pass
+        self._reload()
+
+    def _export_rdf(self) -> None:
+        from . import kg
+
+        if not self._rows:
+            QMessageBox.information(self, "Nothing to export", "No annotations yet.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export annotations RDF", f"annotations-{self._kind}-{self._tid}.ttl",
+            "Turtle (*.ttl);;JSON-LD (*.jsonld);;N-Quads (*.nq)")
+        if not path:
+            return
+        fmt = ("turtle" if path.endswith(".ttl") else "nquads" if path.endswith(".nq")
+               else "jsonld" if path.endswith((".jsonld", ".json"))
+               else {"JSON-LD (*.jsonld)": "jsonld", "N-Quads (*.nq)": "nquads"}.get(selected, "turtle"))
+        if "." not in path.rsplit("/", 1)[-1]:
+            path += kg.EXTENSIONS[fmt]
+        try:
+            from pyoxigraph import DefaultGraph, RdfFormat, Store
+            import io
+            store = Store()
+            for a in self._rows:
+                store.extend(list(kg.quads_for_annotation(a, graph=None)))
+            buf = io.BytesIO()
+            store.dump(buf, kg._FORMATS[fmt], from_graph=DefaultGraph(), prefixes=kg.PREFIXES)
+            with open(path, "wb") as f:
+                f.write(buf.getvalue())
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        reveal_in_file_manager(path)
+
+
+class VocabularyManagerDialog(QDialog):
+    """Create controlled vocabularies (SKOS concept schemes) and their terms,
+    so annotations can align to custom concepts beyond the built-in ontology."""
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self._win = main_window
+        self.setWindowTitle("MeetGraph — Controlled vocabularies")
+        self.setWindowIcon(app_icon())
+        self.resize(760, 480)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+        head = QLabel("Controlled vocabularies")
+        head.setObjectName("HeaderTitle")
+        v.addWidget(head)
+        sub = QLabel("Add your own term lists when the built-in ontology is too limited. Each "
+                     "vocabulary is a SKOS concept scheme; terms get a stable URI and sync to your team.")
+        sub.setObjectName("HeaderSubtitle")
+        sub.setWordWrap(True)
+        v.addWidget(sub)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        # left: vocabularies
+        left = QWidget(); ll = QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(QLabel("Vocabularies"))
+        self.vocab_table = QTableWidget(0, 1)
+        self.vocab_table.setHorizontalHeaderLabels(["Name"])
+        self.vocab_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.vocab_table.verticalHeader().setVisible(False)
+        self.vocab_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.vocab_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.vocab_table.currentCellChanged.connect(lambda *_: self._reload_terms())
+        ll.addWidget(self.vocab_table, 1)
+        vb = QHBoxLayout()
+        addv = QPushButton("＋ New"); addv.clicked.connect(self._add_vocab); vb.addWidget(addv)
+        delv = QPushButton("Delete"); delv.setObjectName("danger"); delv.clicked.connect(self._del_vocab)
+        vb.addWidget(delv); ll.addLayout(vb)
+        split.addWidget(left)
+
+        # right: terms
+        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(QLabel("Terms"))
+        self.term_table = QTableWidget(0, 2)
+        self.term_table.setHorizontalHeaderLabels(["Label", "URI"])
+        self.term_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.term_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.term_table.verticalHeader().setVisible(False)
+        self.term_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.term_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        rl.addWidget(self.term_table, 1)
+        add_row = QHBoxLayout()
+        self.term_label = QLineEdit(); self.term_label.setPlaceholderText("term label, e.g. Reproducibility")
+        add_row.addWidget(self.term_label, 1)
+        self.term_uri = QLineEdit(); self.term_uri.setPlaceholderText("URI (optional — minted if blank)")
+        add_row.addWidget(self.term_uri, 1)
+        addt = QPushButton("＋ Add term"); addt.clicked.connect(self._add_term); add_row.addWidget(addt)
+        rl.addLayout(add_row)
+        delt = QPushButton("Delete term"); delt.setObjectName("danger"); delt.clicked.connect(self._del_term)
+        rl.addWidget(delt)
+        split.addWidget(right)
+        split.setSizes([260, 500])
+        v.addWidget(split, 1)
+
+        row = QHBoxLayout(); row.addStretch()
+        close = QPushButton("Close"); close.clicked.connect(self.accept); row.addWidget(close)
+        v.addLayout(row)
+        self._reload_vocabs()
+
+    def _reload_vocabs(self) -> None:
+        self._vocabs = self._win.store.list_vocabularies()
+        self.vocab_table.setRowCount(0)
+        for vrec in self._vocabs:
+            r = self.vocab_table.rowCount()
+            self.vocab_table.insertRow(r)
+            it = QTableWidgetItem(vrec.get("name") or f"Vocabulary {vrec.get('id')}")
+            it.setData(Qt.ItemDataRole.UserRole, vrec.get("id"))
+            self.vocab_table.setItem(r, 0, it)
+        if self._vocabs:
+            self.vocab_table.setCurrentCell(0, 0)
+        self._reload_terms()
+
+    def _current_vocab_id(self):
+        r = self.vocab_table.currentRow()
+        if r < 0:
+            return None
+        it = self.vocab_table.item(r, 0)
+        return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+    def _reload_terms(self) -> None:
+        vid = self._current_vocab_id()
+        self.term_table.setRowCount(0)
+        if vid is None:
+            return
+        for t in self._win.store.list_terms(vid):
+            r = self.term_table.rowCount()
+            self.term_table.insertRow(r)
+            it = QTableWidgetItem(t.get("label") or "")
+            it.setData(Qt.ItemDataRole.UserRole, t.get("id"))
+            self.term_table.setItem(r, 0, it)
+            self.term_table.setItem(r, 1, QTableWidgetItem(t.get("uri") or ""))
+
+    def _add_vocab(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "New vocabulary", "Vocabulary name:")
+        if not ok or not name.strip():
+            return
+        ns, _ = QInputDialog.getText(self, "New vocabulary",
+                                     "Base namespace URI (optional, e.g. https://example.org/vocab/):")
+        vid = self._win.store.add_vocabulary(name.strip(), namespace=(ns or "").strip())
+        self._win._audit("vocabulary_added", vid, name.strip())
+        self._win._push_vocabulary_async(vid)
+        self._reload_vocabs()
+
+    def _del_vocab(self) -> None:
+        vid = self._current_vocab_id()
+        if vid is None:
+            return
+        if QMessageBox.question(self, "Delete vocabulary",
+                                "Delete this vocabulary and all its terms?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._win.store.delete_vocabulary(vid)
+        self._win._audit("vocabulary_deleted", vid)
+        self._reload_vocabs()
+
+    def _add_term(self) -> None:
+        from . import kg
+
+        vid = self._current_vocab_id()
+        if vid is None:
+            QMessageBox.information(self, "No vocabulary", "Create or select a vocabulary first.")
+            return
+        label = self.term_label.text().strip()
+        if not label:
+            return
+        uri = self.term_uri.text().strip()
+        if not uri:
+            vrec = self._win.store.get_vocabulary(vid) or {}
+            ns = (vrec.get("namespace") or "").strip()
+            tid = self._win.store.add_term(vid, label)
+            uri = (ns.rstrip("/") + "/" + kg._slug(label)) if ns else kg.term_iri(vid, tid)
+            self._win.store.set_term_uri(tid, uri)
+        else:
+            self._win.store.add_term(vid, label, uri=uri)
+        self.term_label.clear(); self.term_uri.clear()
+        self._win._push_vocabulary_async(vid)
+        self._reload_terms()
+
+    def _del_term(self) -> None:
+        r = self.term_table.currentRow()
+        if r < 0:
+            return
+        it = self.term_table.item(r, 0)
+        tid = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if tid is None:
+            return
+        self._win.store.delete_term(tid)
+        vid = self._current_vocab_id()
+        if vid is not None:
+            self._win._push_vocabulary_async(vid)
+        self._reload_terms()
 
 
 class WelcomeDialog(QDialog):
