@@ -5788,14 +5788,23 @@ class NoteEditorDialog(QDialog):
         return self._editor.editor if self._editing else self._view
 
     def _annotate(self) -> None:
-        if self._remote or self._nid is None:
-            QMessageBox.information(self, "Save first", "Save the note before annotating it.")
+        if self._remote:
             return
+        # Capture the selection FIRST (saving below switches to view mode).
         exact = (self._annotate_source().textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
         if not exact:
             QMessageBox.information(self, "Select text first",
                                    "Select some text in the note (view or editor), then Annotate.")
             return
+        # A brand-new note has no id yet \u2014 save it so the annotation has a target.
+        if self._nid is None:
+            if QMessageBox.question(self, "Save note",
+                                    "Save this note so the selection can be annotated?") \
+                    != QMessageBox.StandardButton.Yes:
+                return
+            self._save()
+            if self._nid is None:
+                return
         dlg = AnnotationDialog(self._parent, "note", self._nid, "body", exact)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._refresh_anno_count()
@@ -7138,25 +7147,30 @@ class AnnotationDialog(QDialog):
         self._lookup_status.setText("Looking up…")
 
         def work():
+            # The async helper carries only strings, so resolve here and return a
+            # newline-joined "Label | URL" block (NOT the TermLink object).
             from .wikipedia import resolve_terms
-            links = resolve_terms([term])
-            return links.get(term)
+            link = resolve_terms([term]).get(term)
+            if link is None:
+                return ""
+            out = []
+            if link.wikipedia:
+                out.append(f"Wikipedia | {link.wikipedia}")
+            if link.wikidata:
+                out.append(f"Wikidata | {link.wikidata}")
+            return "\n".join(out)
 
-        def done(link, ok):
-            if not ok or link is None:
+        def done(result, ok):
+            if not ok:
+                self._lookup_status.setText(f"Lookup failed: {result}")
+                return
+            block = (result or "").strip()
+            if not block or block == "OK":   # _AsyncOp emits "OK" for an empty result
                 self._lookup_status.setText("No match found.")
                 return
             existing = self.links_edit.toPlainText().rstrip()
-            add = []
-            if getattr(link, "wikipedia", None):
-                add.append(f"Wikipedia | {link.wikipedia}")
-            if getattr(link, "wikidata", None):
-                add.append(f"Wikidata | {link.wikidata}")
-            if add:
-                self.links_edit.setPlainText((existing + "\n" + "\n".join(add)).strip())
-                self._lookup_status.setText("Added verified link(s).")
-            else:
-                self._lookup_status.setText("No match found.")
+            self.links_edit.setPlainText((existing + "\n" + block).strip() if existing else block)
+            self._lookup_status.setText("Added verified link(s).")
 
         self._win._run_async(work, done)
 
