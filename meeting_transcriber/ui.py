@@ -916,6 +916,42 @@ class MainWindow(QWidget):
                 ("Key term", base + "KeyTerm"), ("Team", base + "Team"),
                 ("Publication", base + "Publication"), ("Agent (person)", base + "Agent")]
 
+    def _annotations_markdown(self, kind: str, target_id) -> str:
+        """A Markdown “Annotations” section (clickable external links) for a target."""
+        import json as _json
+
+        if target_id is None:
+            return ""
+        try:
+            anns = self.store.list_annotations(kind, target_id)
+        except Exception:
+            anns = []
+        if not anns:
+            return ""
+        lines = []
+        for a in anns:
+            quote = (a.get("exact") or "").replace("\n", " ").strip()
+            label = (a.get("entity_label") or a.get("aligned_label")
+                     or (a.get("motivation") or "note"))
+            bits = []
+            if a.get("aligned_uri"):
+                bits.append(f"[{a.get('aligned_label') or 'concept'}]({a['aligned_uri']})")
+            elif a.get("aligned_label"):
+                bits.append(a["aligned_label"])
+            try:
+                links = _json.loads(a.get("links") or "[]")
+            except Exception:
+                links = []
+            for l in links:
+                u = l.get("url")
+                if u:
+                    bits.append(f"[{l.get('label') or u}]({u})")
+            meta = ("  —  " + " · ".join(bits)) if bits else ""
+            cm = f"  _({a['comment']})_" if a.get("comment") else ""
+            qd = f"“{quote}”" if quote else ""
+            lines.append(f"- **{label}**: {qd}{meta}{cm}")
+        return "## Annotations\n\n" + "\n".join(lines) + "\n"
+
     def _extern_annotation_rec(self, rec: dict) -> dict:
         """Map an annotation's id + target_id to global ids for the shared store."""
         rec = dict(rec)
@@ -1801,8 +1837,12 @@ button.</p>
   <li><b>Controlled vocabularies:</b> when the built-in ontology is too limited, open
       <b>Manage vocab…</b> to create your own <b>SKOS</b> term lists; terms get stable URIs and are
       offered in the aligner. Annotations and vocabularies save, sync to your team, and export as RDF.</li>
-  <li><b>Annotations</b> on each meeting/note are listed under the <b>Annotations</b> button and
-      appear as nodes in the Graph tab.</li>
+  <li><b>No duplicates / conflicts:</b> if the span is already an auto-extracted key term, its
+      verified links are reused (not duplicated); duplicate links are merged, and MeetGraph warns if
+      your link conflicts with the one found during enrichment.</li>
+  <li><b>Visible everywhere:</b> annotations (with their external links, clickable) show under the
+      note/meeting in an <b>Annotations</b> section, in the <b>Annotations</b> list, and as nodes in
+      the Graph tab.</li>
 </ul>
 
 <h2>Graph</h2>
@@ -5111,11 +5151,16 @@ class MeetingDetailDialog(QDialog):
     def _current_md(self) -> str:
         scope = self._scope()
         related = f"\n\n---\n\n{self._related_md}" if self._related_md else ""
+        ann = ""
+        if not self._remote and self._mid is not None:
+            a = self._parent._annotations_markdown("meeting", self._mid)
+            if a:
+                ann = "\n\n---\n\n" + a
         if scope == "summary":
-            return self._summary_md + related
+            return self._summary_md + related + ann
         if scope == "transcript":
-            return f"## Full transcript\n\n{self._transcript_md}"
-        return f"{self._summary_md}{related}\n\n---\n\n## Full transcript\n\n{self._transcript_md}"
+            return f"## Full transcript\n\n{self._transcript_md}{ann}"
+        return f"{self._summary_md}{related}\n\n---\n\n## Full transcript\n\n{self._transcript_md}{ann}"
 
     def _update_view(self) -> None:
         self._view.setMarkdown(self._current_md())
@@ -5146,10 +5191,12 @@ class MeetingDetailDialog(QDialog):
         dlg = AnnotationDialog(self._parent, "meeting", self._mid, field, exact)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._refresh_anno_count()
+            self._update_view()
 
     def _open_annotations(self) -> None:
         AnnotationsPanel(self._parent, "meeting", self._mid).exec()
         self._refresh_anno_count()
+        self._update_view()
 
     def _view_context_menu(self, pos) -> None:
         w = self.sender() or self._view
@@ -5808,6 +5855,7 @@ class NoteEditorDialog(QDialog):
         dlg = AnnotationDialog(self._parent, "note", self._nid, "body", exact)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._refresh_anno_count()
+            self._render_view()
 
     def _open_annotations(self) -> None:
         if self._nid is None:
@@ -5815,6 +5863,7 @@ class NoteEditorDialog(QDialog):
             return
         AnnotationsPanel(self._parent, "note", self._nid).exec()
         self._refresh_anno_count()
+        self._render_view()
 
     def _view_context_menu(self, pos) -> None:
         w = self.sender() or self._view
@@ -5998,6 +6047,10 @@ class NoteEditorDialog(QDialog):
         rel_md = self._related_markdown()
         if rel_md:
             md += "\n---\n\n## Related meetings & notes\n\n" + rel_md + "\n"
+        if self._nid is not None:
+            ann_md = self._parent._annotations_markdown("note", self._nid)
+            if ann_md:
+                md += "\n---\n\n" + ann_md
         return md
 
     def _render_view(self) -> None:
@@ -7062,10 +7115,49 @@ class AnnotationDialog(QDialog):
         row.addWidget(save)
         v.addLayout(row)
         self._sync_custom_row()
+        if not self._editing:
+            self._prefill_from_enrichment()
 
     @staticmethod
     def _wrap(layout) -> QWidget:
         w = QWidget(); w.setLayout(layout); return w
+
+    # --- normalize against the enrichment phase (reuse, don't duplicate) ---
+    def _enriched_terms(self) -> dict:
+        """{term_lower: {term, wikipedia, wikidata}} from the target's auto-extraction."""
+        import json as _json
+
+        rec = (self._win.store.get_note(self._target_id) if self._target_kind == "note"
+               else self._win.store.get_meeting(self._target_id))
+        try:
+            s = _json.loads(rec.get("summary_json") or "") if rec else {}
+        except Exception:
+            s = {}
+        out = {}
+        for kt in s.get("key_terms") or []:
+            t = (kt.get("term") or "").strip()
+            if t:
+                out[t.lower()] = {"term": t, "wikipedia": kt.get("wikipedia"),
+                                  "wikidata": kt.get("wikidata")}
+        return out
+
+    def _prefill_from_enrichment(self) -> None:
+        """If the selected span is already a key term from enrichment, reuse its
+        label + verified links so we don't create a duplicate, conflicting link."""
+        match = self._enriched_terms().get((self._exact or "").strip().lower())
+        if not match:
+            return
+        if not self.entity_label.text().strip():
+            self.entity_label.setText(match["term"])
+        if not self.links_edit.toPlainText().strip():
+            add = []
+            if match.get("wikipedia"):
+                add.append(f"Wikipedia | {match['wikipedia']}")
+            if match.get("wikidata"):
+                add.append(f"Wikidata | {match['wikidata']}")
+            if add:
+                self.links_edit.setPlainText("\n".join(add))
+                self._lookup_status.setText("Reused the auto-extracted key term's links — no duplication.")
 
     def _populate_align(self) -> None:
         prev = self.align_combo.currentData()
@@ -7127,16 +7219,20 @@ class AnnotationDialog(QDialog):
         return "\n".join(out)
 
     def _parse_links(self) -> list:
-        links = []
+        links, seen = [], set()
         for line in self.links_edit.toPlainText().splitlines():
             line = line.strip()
             if not line:
                 continue
             if "|" in line:
                 lbl, url = line.split("|", 1)
-                links.append({"label": lbl.strip(), "url": url.strip()})
+                lbl, url = lbl.strip(), url.strip()
             else:
-                links.append({"label": "", "url": line})
+                lbl, url = "", line
+            key = url.rstrip("/").lower()   # normalize: dedup by URL
+            if url and key not in seen:
+                seen.add(key)
+                links.append({"label": lbl, "url": url})
         return links
 
     def _lookup(self) -> None:
@@ -7189,7 +7285,41 @@ class AnnotationDialog(QDialog):
             aligned_uri, aligned_label = data[0], data[1]
         else:
             aligned_uri, aligned_label = "", ""
-        links_json = _json.dumps(self._parse_links())
+        links = self._parse_links()  # already de-duplicated by URL
+
+        # Conflict check: if this entity was auto-linked during enrichment, warn when
+        # the annotation points somewhere different (e.g. a different Wikidata entity).
+        match = self._enriched_terms().get((entity or self._exact or "").strip().lower())
+        if match and match.get("wikidata"):
+            mine = {l["url"].rstrip("/") for l in links} | ({aligned_uri.rstrip("/")} if aligned_uri else set())
+            wd = match["wikidata"].rstrip("/")
+            if mine and wd not in mine and not any("wikidata.org" in u and u == wd for u in mine):
+                if any("wikidata.org" in u for u in mine):
+                    if QMessageBox.question(
+                        self, "Possible conflict",
+                        f"“{match['term']}” was auto-linked to {match['wikidata']}, but this annotation "
+                        f"links to a different Wikidata entity. Keep your link anyway?") \
+                            != QMessageBox.StandardButton.Yes:
+                        return
+
+        # De-duplicate: don't add a second annotation for the exact same span.
+        if not self._editing:
+            existing = [a for a in self._win.store.list_annotations(self._target_kind, self._target_id)
+                        if (a.get("exact") or "").strip() == (self._exact or "").strip()]
+            if existing:
+                ans = QMessageBox.question(
+                    self, "Already annotated",
+                    "This exact selection is already annotated. Update the existing annotation "
+                    "instead of adding a duplicate?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel)
+                if ans == QMessageBox.StandardButton.Cancel:
+                    return
+                if ans == QMessageBox.StandardButton.Yes:
+                    self._editing = True
+                    self._rec = existing[0]
+
+        links_json = _json.dumps(links)
         try:
             if self._editing:
                 aid = self._rec.get("id")
@@ -7271,12 +7401,18 @@ class AnnotationsPanel(QDialog):
             self.table.setItem(r, 0, it)
             self.table.setItem(r, 1, QTableWidgetItem(a.get("motivation") or ""))
             concept = a.get("entity_label") or a.get("aligned_label") or ""
-            self.table.setItem(r, 2, QTableWidgetItem(concept))
+            citem = QTableWidgetItem(concept)
+            if a.get("aligned_uri"):
+                citem.setToolTip(a["aligned_uri"])
+            self.table.setItem(r, 2, citem)
             try:
-                n = len(_json.loads(a.get("links") or "[]"))
+                urls = [l.get("url", "") for l in _json.loads(a.get("links") or "[]") if l.get("url")]
             except Exception:
-                n = 0
-            self.table.setItem(r, 3, QTableWidgetItem(str(n) if n else ""))
+                urls = []
+            links_item = QTableWidgetItem("  ·  ".join(urls) if urls else "")
+            if urls:
+                links_item.setToolTip("\n".join(urls))
+            self.table.setItem(r, 3, links_item)
 
     def _selected_id(self):
         r = self.table.currentRow()
