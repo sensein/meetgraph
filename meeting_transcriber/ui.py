@@ -1140,9 +1140,10 @@ class MainWindow(QWidget):
         v.setSpacing(10)
 
         intro = QLabel(
-            "Your knowledge graph — meetings, notes, the key terms they share, teams, and the links "
-            "between them. Scroll to zoom, drag the background to pan, and click a meeting or note "
-            "(blue/teal) to open and edit it (changes sync as usual).")
+            "Your knowledge graph — meetings, notes, key terms, annotations, teams, and their links. "
+            "“This device — all local” shows everything stored locally (personal + team-tagged). "
+            "Search to filter, scroll to zoom, drag to pan, and click a meeting/note (blue/teal) to "
+            "edit it, a key term (amber) to see where it's used, or an annotation (rose) to edit it.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#64748b; font-size:12px;")
         v.addWidget(intro)
@@ -1153,6 +1154,12 @@ class MainWindow(QWidget):
         self.graph_scope_combo.currentIndexChanged.connect(self._refresh_graph)
         self._populate_graph_scope_combo()
         row.addWidget(self.graph_scope_combo)
+        self.graph_search = QLineEdit()
+        self.graph_search.setPlaceholderText("🔎  Search nodes — title, term, annotation…")
+        self.graph_search.setClearButtonEnabled(True)
+        self.graph_search.setMaximumWidth(260)
+        self.graph_search.textChanged.connect(self._refresh_graph)
+        row.addWidget(self.graph_search)
         # Legend
         for label, color in (("Meeting", "#2563eb"), ("Note", "#0d9488"),
                              ("Key term", "#f59e0b"), ("Annotation", "#e11d48"),
@@ -1187,11 +1194,10 @@ class MainWindow(QWidget):
             memberships = self.store.list_memberships()
         except Exception:
             memberships = []
-        self.graph_scope_combo.addItem("All (personal + teams)", ("all", None))
-        self.graph_scope_combo.addItem("Personal (this device)", ("personal", None))
+        self.graph_scope_combo.addItem("This device — all local", ("all", None))
         for m in memberships:
             name = m.get("team_name") or m.get("team_id")
-            self.graph_scope_combo.addItem(f"Team · {name}", ("team", m.get("team_id")))
+            self.graph_scope_combo.addItem(f"Team · {name} (local)", ("team", m.get("team_id")))
         idx = self.graph_scope_combo.findData(prev) if prev else -1
         self.graph_scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.graph_scope_combo.blockSignals(False)
@@ -1209,8 +1215,9 @@ class MainWindow(QWidget):
             return key
 
         def want(tid):
-            if kind == "personal":
-                return not tid
+            # "Personal (this device)" = everything stored locally (matches the
+            # Summary tab), NOT only untagged items — otherwise team-tagged local
+            # content makes the graph look empty.
             if kind == "team":
                 return tid == team_id
             return True
@@ -1309,6 +1316,22 @@ class MainWindow(QWidget):
         scope = self.graph_scope_combo.currentData() if hasattr(self, "graph_scope_combo") else ("all", None)
         kind, team_id = scope if scope else ("all", None)
         nodes, edges, dropped = self._build_graph_model(kind, team_id)
+
+        query = (self.graph_search.text() if hasattr(self, "graph_search") else "").strip().lower()
+        n_match = None
+        if query:
+            hits = {k for k, v in nodes.items() if query in (v.get("label") or "").lower()}
+            n_match = len(hits)
+            # keep matches + their immediate neighbours so context is visible
+            keep = set(hits)
+            for a, b in edges:
+                if a in hits:
+                    keep.add(b)
+                if b in hits:
+                    keep.add(a)
+            nodes = {k: v for k, v in nodes.items() if k in keep}
+            edges = [(a, b) for a, b in edges if a in nodes and b in nodes]
+
         pos = _force_graph_layout(list(nodes.keys()), edges)
         self.graph_canvas.set_graph(nodes, edges, pos)
         n_m = sum(1 for v in nodes.values() if v["kind"] == "meeting")
@@ -1317,10 +1340,13 @@ class MainWindow(QWidget):
         n_a = sum(1 for v in nodes.values() if v["kind"] == "annotation")
         msg = (f"{n_m} meeting(s) · {n_n} note(s) · {n_a} annotation(s) · "
                f"{n_t} key term(s) · {len(edges)} link(s)")
+        if query:
+            msg = f"{n_match} match(es) for “{query}” (+ neighbours)  ·  " + msg
         if dropped:
             msg += "  ·  key terms hidden (graph too large) — narrow the scope to see them"
         elif not nodes:
-            msg = "Nothing in this scope yet — record a meeting or write a note."
+            msg = (f"No nodes match “{query}”." if query
+                   else "Nothing in this scope yet — record a meeting or write a note.")
         self.graph_count.setText(msg)
 
     def _open_graph_node(self, kind: str, ref) -> None:
@@ -1848,8 +1874,10 @@ button.</p>
 <h2>Graph</h2>
 <p>The <b>🕸 Graph</b> tab visualises your knowledge graph — meetings, notes, the key terms they
 share, <b>annotations</b>, teams, and the links between them. <b>Scroll</b> to zoom, <b>drag</b> to
-pan, <b>Fit</b> to recenter, and <b>Show</b> to scope to Personal / All / a team. <b>Click a meeting
-or note</b> (blue/teal) to open and edit it — your changes save and sync, then the graph refreshes.
+pan, <b>Fit</b> to recenter, and <b>Search</b> to filter to matching nodes (plus their neighbours).
+<b>Show</b> scopes to <b>This device — all local</b> (everything stored here, personal <i>and</i>
+team-tagged) or a single team. <b>Click a meeting or note</b> (blue/teal) to open and edit it —
+your changes save and sync, then the graph refreshes.
 <b>Click a key term</b> (amber) to see every meeting and note that mentions it; <b>click an
 annotation</b> (rose) to edit it. Colours: blue = meeting, teal = note, amber = key term/concept,
 rose = annotation, purple = team.</p>
