@@ -34,33 +34,13 @@ and turns the conversation into structured, linked, shareable knowledge. Additio
 
 ---
 
-## Screenshots
+## Demo
 
-**Welcome / intro** — first-run setup: your name, optional email, and a quick join field.
-
-![Intro screen](img/intro-screen.png)
-
-**Meeting** — live transcript with per-speaker labels, an auto-refreshing summary, the models banner, and the *Recording into:* team picker.
-
-![Meeting tab](img/meeting.png)
-
-**Summary** — searchable meetings table with the **Show** scope (Personal / All / a team) and **Team** column; open any row for full notes + transcript.
-
-![Summary tab](img/summary-i.png)
-
-![Meeting detail](img/summary-ii.png)
-
-**Configuration** — transcription engine + acceleration, AI notes provider, external databases, teams, email, integrations, and PubMed.
-
-![Configuration tab](img/configuration.png)
-
-**Notes** — searchable notes table with the **Show** scope (Personal / All / a team).
-
-![Configuration tab](img/note-view.png)
-
-**Visualization** — visualization of notes, meetings graph.
-
-![Configuration tab](img/graph-view.png)
+<p align="center">
+  <a href="https://youtu.be/GKdy1pDAbqo">
+    <img src="https://img.youtube.com/vi/GKdy1pDAbqo/maxresdefault.jpg" alt="MeetGraph Demo" width="700">
+  </a>
+</p>
 
 ---
 
